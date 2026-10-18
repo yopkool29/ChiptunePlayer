@@ -8,13 +8,15 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// vuBar is a vertical segmented VU-meter widget in classic Amiga
-// tracker style: green segments at the bottom, yellow then red at
-// the top, on a dark navy background, with a decaying peak marker.
+// vuBar is a continuous vertical VU-meter widget in classic Amiga
+// tracker style: a smooth green -> yellow -> orange -> red gradient
+// on a dark navy background, with VU ballistics (instant attack,
+// smoothed release) and a decaying white peak marker.
 type vuBar struct {
 	widget.BaseWidget
-	value float64 // 0..100
-	peak  float64 // 0..100, decays
+	target float64 // latest measured value 0..100
+	disp   float64 // displayed value (smoothed)
+	peak   float64 // peak marker, decays
 }
 
 func newVUBar() *vuBar {
@@ -23,6 +25,7 @@ func newVUBar() *vuBar {
 	return v
 }
 
+// SetValue feeds the meter; call at ~30 Hz for smooth animation.
 func (v *vuBar) SetValue(f float64) {
 	if f > 100 {
 		f = 100
@@ -30,13 +33,18 @@ func (v *vuBar) SetValue(f float64) {
 	if f < 0 {
 		f = 0
 	}
-	v.value = f
-	if f >= v.peak {
-		v.peak = f
+	v.target = f
+	if f > v.disp {
+		v.disp = f // instant attack
 	} else {
-		v.peak -= 4 // ~0.7s fall time at 10Hz refresh
-		if v.peak < f {
-			v.peak = f
+		v.disp += (f - v.disp) * 0.18 // smooth release (~6 frames time constant)
+	}
+	if v.disp >= v.peak {
+		v.peak = v.disp
+	} else {
+		v.peak -= 0.9 // ~1s fall time at 30 Hz
+		if v.peak < v.disp {
+			v.peak = v.disp
 		}
 	}
 	v.Refresh()
@@ -50,70 +58,27 @@ func (v *vuBar) CreateRenderer() fyne.WidgetRenderer {
 	r := &vuRenderer{bar: v}
 	r.bg = canvas.NewRectangle(vuBgColor)
 	r.bg.CornerRadius = 2
-	for i := 0; i < vuSegments; i++ {
-		r.segs = append(r.segs, canvas.NewRectangle(vuSegColor(i, false)))
-	}
+	// Vertical gradient: start color at top, end color at bottom.
+	r.grad = canvas.NewVerticalGradient(
+		color.NRGBA{0xFF, 0x28, 0x10, 0xFF}, // top: red
+		color.NRGBA{0x00, 0x50, 0x08, 0xFF}, // bottom: dark green
+	)
+	r.cover = canvas.NewRectangle(vuBgColor)
 	r.peak = canvas.NewRectangle(vuPeakColor)
-	r.objs = append(r.objs, r.bg)
-	for _, s := range r.segs {
-		r.objs = append(r.objs, s)
-	}
-	r.objs = append(r.objs, r.peak)
+	r.objs = []fyne.CanvasObject{r.bg, r.grad, r.cover, r.peak}
 	return r
 }
-
-const vuSegments = 16
 
 var (
 	vuBgColor   = color.NRGBA{0x08, 0x08, 0x30, 0xFF} // dark navy, tracker style
 	vuPeakColor = color.NRGBA{0xFF, 0xFF, 0xFF, 0xFF}
-	vuOffColor  = color.NRGBA{0x14, 0x14, 0x40, 0xFF} // unlit segment
 )
-
-// Gradient stops: dark green at the bottom ramping up to red at the top.
-type vuStop struct {
-	t float64
-	c color.NRGBA
-}
-
-var vuStops = []vuStop{
-	{0.00, color.NRGBA{0x00, 0x50, 0x08, 0xFF}}, // dark green
-	{0.40, color.NRGBA{0x00, 0xD8, 0x20, 0xFF}}, // bright green
-	{0.72, color.NRGBA{0xE8, 0xE0, 0x00, 0xFF}}, // yellow
-	{0.90, color.NRGBA{0xFF, 0x90, 0x00, 0xFF}}, // orange
-	{1.00, color.NRGBA{0xFF, 0x28, 0x10, 0xFF}}, // red
-}
-
-func lerp(a, b uint8, f float64) uint8 {
-	return a + uint8(float64(b-a)*f)
-}
-
-// vuSegColor returns the color of segment i (0 = bottom).
-func vuSegColor(i int, off bool) color.Color {
-	if off {
-		return vuOffColor
-	}
-	t := float64(i) / float64(vuSegments-1)
-	lo := vuStops[0]
-	for _, s := range vuStops[1:] {
-		if t <= s.t {
-			f := (t - lo.t) / (s.t - lo.t)
-			return color.NRGBA{
-				lerp(lo.c.R, s.c.R, f),
-				lerp(lo.c.G, s.c.G, f),
-				lerp(lo.c.B, s.c.B, f),
-				0xFF,
-			}
-		}
-		lo = s
-	}
-	return vuStops[len(vuStops)-1].c
-}
 
 type vuRenderer struct {
 	bar   *vuBar
 	bg    *canvas.Rectangle
-	segs  []*canvas.Rectangle
+	grad  *canvas.LinearGradient
+	cover *canvas.Rectangle
 	peak  *canvas.Rectangle
 	objs  []fyne.CanvasObject
 }
@@ -125,28 +90,28 @@ func (r *vuRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
 	r.bg.Move(fyne.NewPos(0, 0))
 
-	const gap = float32(2)
-	const pad = float32(3)
-	inner := size.Height - 2*pad
-	segH := (inner - gap*(vuSegments-1)) / vuSegments
+	const pad = float32(2)
+	innerH := size.Height - 2*pad
+	litH := float32(r.bar.disp/100) * innerH
+	coverH := innerH - litH
 
-	lit := int(r.bar.value * vuSegments / 100.0)
-	peakPos := int(r.bar.peak*vuSegments/100.0) - 1
-	if peakPos < 0 && r.bar.peak > 0 {
-		peakPos = 0
+	r.grad.Resize(size)
+	r.grad.Move(fyne.NewPos(0, 0))
+
+	// cover hides the unlit top part of the gradient
+	r.cover.Move(fyne.NewPos(pad, pad))
+	r.cover.Resize(fyne.NewSize(size.Width-2*pad, coverH))
+	if coverH <= 0 {
+		r.cover.Hide()
+	} else {
+		r.cover.Show()
 	}
 
-	for i := 0; i < vuSegments; i++ {
-		y := size.Height - pad - float32(i+1)*segH - float32(i)*gap // bottom-up
-		r.segs[i].Move(fyne.NewPos(pad, y))
-		r.segs[i].Resize(fyne.NewSize(size.Width-2*pad, segH))
-		r.segs[i].FillColor = vuSegColor(i, i >= lit)
-	}
-
-	if peakPos >= 0 && peakPos < vuSegments {
-		y := size.Height - pad - float32(peakPos+1)*segH - float32(peakPos)*gap
-		r.peak.Move(fyne.NewPos(pad, y+segH/4))
-		r.peak.Resize(fyne.NewSize(size.Width-2*pad, segH/2))
+	// peak line just above the lit part
+	if r.bar.peak > 0.5 {
+		py := pad + float32(1-r.bar.peak/100)*innerH
+		r.peak.Move(fyne.NewPos(pad, py))
+		r.peak.Resize(fyne.NewSize(size.Width-2*pad, 3))
 		r.peak.Show()
 	} else {
 		r.peak.Hide()

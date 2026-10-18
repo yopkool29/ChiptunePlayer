@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,10 @@ var moduleExts = []string{
 type engine struct {
 	mu       sync.Mutex // guards dec against reload while Read is in flight
 	dec      *decoder.Decoder
+	next     *decoder.Decoder // pending decoder swapped in when fade-out reaches 0
+	fading   bool
+	gain     float64 // current volume ramp 0..1
+	fadeStep float64 // <0 fading out, >0 fading in
 	player   *oto.Player
 	filePath string
 	sub      int
@@ -44,8 +49,38 @@ type engine struct {
 	posBytes atomic.Int64 // bytes pushed to audio since song start
 }
 
+// Fade lengths in stereo frames @44.1kHz.
+const (
+	fadeOutStep = -1.0 / 2000.0 // ~45 ms
+	fadeInStep  = 1.0 / 1100.0  // ~25 ms
+)
+
 func (e *engine) position() time.Duration {
 	return time.Duration(e.posBytes.Load()/4) * time.Second / time.Duration(sampleRate)
+}
+
+// transition fades the current decoder out and swaps in next
+// (nil = stop) at the silence point, avoiding clicks.
+func (e *engine) transition(next *decoder.Decoder) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.dec == nil || !e.playing.Load() || e.paused.Load() {
+		// nothing audible: swap immediately
+		if e.dec != nil {
+			e.dec.Close()
+		}
+		e.dec = next
+		e.fading = false
+		e.gain = 1.0
+		e.posBytes.Store(0)
+		if next == nil {
+			e.playing.Store(false)
+		}
+		return
+	}
+	e.next = next
+	e.fading = true
+	e.fadeStep = fadeOutStep
 }
 
 // Read implements io.Reader for oto.
@@ -59,9 +94,80 @@ func (e *engine) Read(p []byte) (int, error) {
 		}
 		return len(p), nil
 	}
+
 	e.mu.Lock()
-	e.dec.FillBuffer(p)
-	e.mu.Unlock()
+	defer e.mu.Unlock()
+
+	if e.dec == nil {
+		for i := range p {
+			p[i] = 0
+		}
+		return len(p), nil
+	}
+
+	off := 0
+	for off < len(p) {
+		if e.fading {
+			if e.gain <= 0 {
+				// silence point reached: swap decoders
+				if e.dec != nil {
+					e.dec.Close()
+				}
+				e.dec = e.next
+				e.next = nil
+				e.posBytes.Store(0)
+				if e.dec == nil {
+					e.fading = false
+					e.playing.Store(false)
+					for i := off; i < len(p); i++ {
+						p[i] = 0
+					}
+					e.posBytes.Add(int64(off))
+					if off == 0 {
+						return 0, io.EOF
+					}
+					return len(p), nil
+				}
+				e.fadeStep = fadeInStep // fade the new module in
+			}
+
+			// frames we can render before the gain hits its boundary
+			var lim int
+			if e.fadeStep < 0 {
+				lim = int(e.gain / -e.fadeStep)
+			} else {
+				lim = int((1.0 - e.gain) / e.fadeStep)
+			}
+			if lim < 1 {
+				lim = 1
+			}
+			chunk := len(p) - off
+			if chunk > lim*4 {
+				chunk = lim * 4
+			}
+			e.dec.FillBuffer(p[off : off+chunk])
+			for i := 0; i < chunk/4; i++ {
+				idx := off + i*4
+				l := int16(binary.LittleEndian.Uint16(p[idx:]))
+				r := int16(binary.LittleEndian.Uint16(p[idx+2:]))
+				binary.LittleEndian.PutUint16(p[idx:], uint16(float64(l)*e.gain))
+				binary.LittleEndian.PutUint16(p[idx+2:], uint16(float64(r)*e.gain))
+				e.gain += e.fadeStep
+			}
+			if e.gain < 0 {
+				e.gain = 0
+			}
+			if e.fadeStep > 0 && e.gain >= 1.0 {
+				e.gain = 1.0
+				e.fading = false
+			}
+			off += chunk
+		} else {
+			e.dec.FillBuffer(p[off:])
+			off = len(p)
+		}
+	}
+
 	e.posBytes.Add(int64(len(p)))
 	return len(p), nil
 }
@@ -112,6 +218,15 @@ func main() {
 
 	var updPosGuard bool
 
+	// withDec runs fn under the decoder lock if a decoder is loaded.
+	withDec := func(fn func(d *decoder.Decoder)) {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		if eng.dec != nil {
+			fn(eng.dec)
+		}
+	}
+
 	setTransport := func(loaded bool) {
 		playBtn.Enable()
 		if !loaded {
@@ -123,15 +238,16 @@ func main() {
 	setTransport(false)
 
 	startPlayback := func() {
-		if eng.player != nil {
-			eng.player.Close()
-			eng.player = nil
-		}
 		eng.posBytes.Store(0)
 		eng.playing.Store(true)
 		eng.paused.Store(false)
-		eng.player = otoCtx.NewPlayer(eng)
-		eng.player.Play()
+		if eng.player == nil || !eng.player.IsPlaying() {
+			if eng.player != nil {
+				eng.player.Close()
+			}
+			eng.player = otoCtx.NewPlayer(eng)
+			eng.player.Play()
+		}
 		playBtn.SetText("Restart")
 		pauseBtn.SetText("Pause")
 		pauseBtn.Enable()
@@ -148,18 +264,7 @@ func main() {
 			dialog.ShowError(err, w)
 			return
 		}
-		eng.mu.Lock()
-		if eng.dec != nil {
-			eng.dec.Close()
-		}
-		eng.dec = d
-		eng.mu.Unlock()
-		eng.filePath = path
-		eng.sub = sub
-		if lu, err := storage.ListerForURI(storage.NewFileURI(filepath.Dir(path))); err == nil {
-			startDir = lu
-		}
-
+		// configure before swapping so the first rendered frames are correct
 		d.MixerInit(sampleRate, 16, 2, 0, int(panSlider.Value))
 		d.SetFiltering(filterChk.Checked)
 		d.SetLoopMode(loopChk.Checked)
@@ -168,6 +273,13 @@ func main() {
 			if c != nil {
 				d.MuteVoice(i, c.Checked)
 			}
+		}
+
+		eng.transition(d) // fade out old module, fade in the new one
+		eng.filePath = path
+		eng.sub = sub
+		if lu, err := storage.ListerForURI(storage.NewFileURI(filepath.Dir(path))); err == nil {
+			startDir = lu
 		}
 
 		fileLabel.SetText(path)
@@ -179,7 +291,9 @@ func main() {
 			dur = 1
 		}
 		posSlider.Max = dur
-		startPlayback()
+		if !eng.playing.Load() {
+			startPlayback()
+		}
 	}
 
 	openFile := func() {
@@ -244,10 +358,15 @@ func main() {
 		if eng.dec == nil {
 			return
 		}
-		if eng.playing.Load() {
-			eng.dec.Reinit(eng.sub) // restart current subsong
+		switch {
+		case eng.paused.Load(): // resume
+			eng.paused.Store(false)
+			pauseBtn.SetText("Pause")
+		case eng.playing.Load(): // restart current subsong with a fade
+			loadModule(eng.filePath, eng.sub)
+		default:
+			startPlayback()
 		}
-		startPlayback()
 	}
 	pauseBtn.OnTapped = func() {
 		if !eng.playing.Load() {
@@ -262,36 +381,29 @@ func main() {
 		}
 	}
 	stopBtn.OnTapped = func() {
-		eng.playing.Store(false)
+		eng.transition(nil) // fade out, then EOF -> player stops
 		eng.paused.Store(false)
 		playBtn.SetText("Play")
 		pauseBtn.Disable()
 		stopBtn.Disable()
-		eng.posBytes.Store(0)
 	}
 	prevSub.OnTapped = func() { switchSub(eng, loadModule, -1) }
 	nextSub.OnTapped = func() { switchSub(eng, loadModule, +1) }
 
 	loopChk.OnChanged = func(b bool) {
-		if eng.dec != nil {
-			eng.dec.SetLoopMode(b)
-		}
+		withDec(func(d *decoder.Decoder) { d.SetLoopMode(b) })
 	}
 	filterChk.OnChanged = func(b bool) {
-		if eng.dec != nil {
-			eng.dec.SetFiltering(b)
-		}
+		withDec(func(d *decoder.Decoder) { d.SetFiltering(b) })
 	}
 	panSlider.OnChanged = func(v float64) {
-		if eng.dec != nil {
-			eng.dec.SetPanning(int(v))
-		}
+		withDec(func(d *decoder.Decoder) { d.SetPanning(int(v)) })
 	}
 	posSlider.OnChangeEnded = func(v float64) {
-		if eng.dec != nil {
-			eng.dec.Seek(int(v))
+		withDec(func(d *decoder.Decoder) {
+			d.Seek(int(v))
 			eng.posBytes.Store(int64(v) * int64(sampleRate) * 4 / 1000)
-		}
+		})
 		updPosGuard = false
 	}
 	posSlider.OnChanged = func(float64) { updPosGuard = true }
@@ -309,9 +421,7 @@ func main() {
 	for i := 0; i < 8; i++ {
 		v := i
 		chk := widget.NewCheck(fmt.Sprintf("V%d", v), func(b bool) {
-			if eng.dec != nil {
-				eng.dec.MuteVoice(v, b)
-			}
+			withDec(func(d *decoder.Decoder) { d.MuteVoice(v, b) })
 		})
 		bar := newVUBar()
 		col := container.NewBorder(chk, nil, nil, nil, container.NewCenter(bar))
@@ -343,30 +453,43 @@ func main() {
 	// ---------- ui refresh loop ----------
 
 	go func() {
-		t := time.NewTicker(100 * time.Millisecond)
+		t := time.NewTicker(33 * time.Millisecond)
 		for range t.C {
+			eng.mu.Lock()
+			var songEnd bool
+			var nVoices, dur int
+			vols := make([]int, 8)
+			if eng.dec != nil {
+				songEnd = eng.dec.SongEnd()
+				dur = int(eng.dec.Duration())
+				if nVoices = eng.dec.Voices(); nVoices > 8 {
+					nVoices = 8
+				}
+				for i := 0; i < nVoices; i++ {
+					vols[i] = eng.dec.VoiceVolume(i)
+				}
+			}
+			eng.mu.Unlock()
 			if eng.dec == nil {
 				continue
 			}
 			fyne.Do(func() {
-				if eng.playing.Load() && eng.dec.SongEnd() {
+				if eng.playing.Load() && songEnd {
 					stopBtn.OnTapped()
 				}
 				if !updPosGuard {
 					posSlider.Value = float64(eng.position().Milliseconds())
 					posSlider.Refresh()
 				}
-				total := time.Duration(eng.dec.Duration()) * time.Millisecond
+				total := time.Duration(dur) * time.Millisecond
 				posLabel.SetText(fmt.Sprintf("%s / %s",
 					eng.position().Round(time.Second), total.Round(time.Second)))
-				if n := eng.dec.Voices(); n > 0 {
-					for i := 0; i < n && i < 8; i++ {
-						voiceBars[i].SetValue(float64(eng.dec.VoiceVolume(i)))
-						voiceCols[i].Show()
-					}
-					for i := n; i < 8; i++ {
-						voiceCols[i].Hide()
-					}
+				for i := 0; i < nVoices; i++ {
+					voiceBars[i].SetValue(float64(vols[i]))
+					voiceCols[i].Show()
+				}
+				for i := nVoices; i < 8; i++ {
+					voiceCols[i].Hide()
 				}
 			})
 		}
