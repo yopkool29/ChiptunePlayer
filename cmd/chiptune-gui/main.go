@@ -106,8 +106,9 @@ func main() {
 	panSlider.SetValue(75)
 
 	voiceChecks := make([]*widget.Check, 8)
-	voiceBars := make([]*widget.ProgressBar, 8)
-	voiceBox := container.NewVBox()
+	voiceBars := make([]*vuBar, 8)
+	voiceCols := make([]*fyne.Container, 8)
+	voiceBox := container.New(layout.NewGridLayoutWithColumns(8))
 
 	var updPosGuard bool
 
@@ -312,13 +313,13 @@ func main() {
 				eng.dec.MuteVoice(v, b)
 			}
 		})
-		bar := widget.NewProgressBar()
-		bar.Max = 100
-		chk.Hide()
-		bar.Hide()
+		bar := newVUBar()
+		col := container.NewBorder(chk, nil, nil, nil, container.NewCenter(bar))
+		col.Hide()
 		voiceChecks[i] = chk
 		voiceBars[i] = bar
-		voiceBox.Add(container.NewBorder(nil, nil, chk, nil, bar))
+		voiceCols[i] = col
+		voiceBox.Add(col)
 	}
 	voicesGroup := widget.NewCard("Voices", "", voiceBox)
 
@@ -361,17 +362,20 @@ func main() {
 				if n := eng.dec.Voices(); n > 0 {
 					for i := 0; i < n && i < 8; i++ {
 						voiceBars[i].SetValue(float64(eng.dec.VoiceVolume(i)))
-						voiceBars[i].Show()
-						voiceChecks[i].Show()
+						voiceCols[i].Show()
 					}
 					for i := n; i < 8; i++ {
-						voiceBars[i].Hide()
-						voiceChecks[i].Hide()
+						voiceCols[i].Hide()
 					}
 				}
 			})
 		}
 	}()
+
+	// optional: load a module given on the command line
+	if len(os.Args) > 1 {
+		loadModule(os.Args[1], 0)
+	}
 
 	w.SetOnClosed(func() {
 		eng.playing.Store(false)
