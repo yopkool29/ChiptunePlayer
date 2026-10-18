@@ -276,6 +276,9 @@ func main() {
 		}
 
 		eng.transition(d) // fade out old module, fade in the new one
+		for _, bar := range voiceBars {
+			bar.Reset()
+		}
 		eng.filePath = path
 		eng.sub = sub
 		if lu, err := storage.ListerForURI(storage.NewFileURI(filepath.Dir(path))); err == nil {
@@ -452,29 +455,37 @@ func main() {
 
 	// ---------- ui refresh loop ----------
 
+	uiDone := make(chan struct{})
 	go func() {
 		t := time.NewTicker(33 * time.Millisecond)
-		for range t.C {
+		defer t.Stop()
+		for {
+			select {
+			case <-uiDone:
+				return
+			case <-t.C:
+			}
 			eng.mu.Lock()
+			hasDec := eng.dec != nil
 			var songEnd bool
 			var nVoices, dur int
 			vols := make([]int, 8)
-			if eng.dec != nil {
+			if hasDec {
 				songEnd = eng.dec.SongEnd()
 				dur = int(eng.dec.Duration())
 				if nVoices = eng.dec.Voices(); nVoices > 8 {
 					nVoices = 8
 				}
+				active := eng.playing.Load() && !eng.paused.Load()
 				for i := 0; i < nVoices; i++ {
-					vols[i] = eng.dec.VoiceVolume(i)
+					if active {
+						vols[i] = eng.dec.VoiceVolume(i)
+					}
 				}
 			}
 			eng.mu.Unlock()
-			if eng.dec == nil {
-				continue
-			}
 			fyne.Do(func() {
-				if eng.playing.Load() && songEnd {
+				if hasDec && eng.playing.Load() && songEnd {
 					stopBtn.OnTapped()
 				}
 				if !updPosGuard {
@@ -501,12 +512,16 @@ func main() {
 	}
 
 	w.SetOnClosed(func() {
+		close(uiDone) // stop the refresh goroutine before fyne drains its queue
 		eng.playing.Store(false)
-		if eng.player != nil {
-			eng.player.Close()
-		}
+		eng.mu.Lock()
 		if eng.dec != nil {
 			eng.dec.Close()
+			eng.dec = nil
+		}
+		eng.mu.Unlock()
+		if eng.player != nil {
+			eng.player.Close()
 		}
 	})
 
