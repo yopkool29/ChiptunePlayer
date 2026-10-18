@@ -62,7 +62,7 @@ func (v *vuBar) CreateRenderer() fyne.WidgetRenderer {
 	return r
 }
 
-const vuSegments = 14
+const vuSegments = 16
 
 var (
 	vuBgColor   = color.NRGBA{0x08, 0x08, 0x30, 0xFF} // dark navy, tracker style
@@ -70,19 +70,44 @@ var (
 	vuOffColor  = color.NRGBA{0x14, 0x14, 0x40, 0xFF} // unlit segment
 )
 
+// Gradient stops: dark green at the bottom ramping up to red at the top.
+type vuStop struct {
+	t float64
+	c color.NRGBA
+}
+
+var vuStops = []vuStop{
+	{0.00, color.NRGBA{0x00, 0x50, 0x08, 0xFF}}, // dark green
+	{0.40, color.NRGBA{0x00, 0xD8, 0x20, 0xFF}}, // bright green
+	{0.72, color.NRGBA{0xE8, 0xE0, 0x00, 0xFF}}, // yellow
+	{0.90, color.NRGBA{0xFF, 0x90, 0x00, 0xFF}}, // orange
+	{1.00, color.NRGBA{0xFF, 0x28, 0x10, 0xFF}}, // red
+}
+
+func lerp(a, b uint8, f float64) uint8 {
+	return a + uint8(float64(b-a)*f)
+}
+
 // vuSegColor returns the color of segment i (0 = bottom).
 func vuSegColor(i int, off bool) color.Color {
 	if off {
 		return vuOffColor
 	}
-	switch {
-	case i >= vuSegments-2: // top 2: red
-		return color.NRGBA{0xFF, 0x20, 0x20, 0xFF}
-	case i >= vuSegments-5: // next 3: yellow
-		return color.NRGBA{0xF0, 0xE0, 0x00, 0xFF}
-	default: // rest: green
-		return color.NRGBA{0x00, 0xD8, 0x20, 0xFF}
+	t := float64(i) / float64(vuSegments-1)
+	lo := vuStops[0]
+	for _, s := range vuStops[1:] {
+		if t <= s.t {
+			f := (t - lo.t) / (s.t - lo.t)
+			return color.NRGBA{
+				lerp(lo.c.R, s.c.R, f),
+				lerp(lo.c.G, s.c.G, f),
+				lerp(lo.c.B, s.c.B, f),
+				0xFF,
+			}
+		}
+		lo = s
 	}
+	return vuStops[len(vuStops)-1].c
 }
 
 type vuRenderer struct {
