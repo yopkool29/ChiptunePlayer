@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -578,11 +579,20 @@ func switchSub(eng *engine, load func(string, int), delta int) {
 	load(eng.filePath, sub)
 }
 
-// extFilter accepts files by extension (case-insensitive).
+// extFilter accepts files by extension or by AmigaDOS-style name
+// prefix (mdat.*, MCMD.*), both case-insensitive.
 type extFilter struct{ exts []string }
 
+var modulePrefixes = []string{"mdat.", "mcmd."}
+
 func (f *extFilter) Matches(uri fyne.URI) bool {
-	ext := uri.Extension()
+	name := strings.ToLower(uri.Name())
+	for _, p := range modulePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	ext := strings.ToLower(uri.Extension())
 	for _, e := range f.exts {
 		if ext == "."+e {
 			return true
