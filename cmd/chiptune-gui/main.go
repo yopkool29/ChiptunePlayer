@@ -32,6 +32,14 @@ var moduleExts = []string{
 	"tfx", "tfm", "tfmx", "mdat", "sog", "soc", "s7g",
 }
 
+// moduleMeta snapshots the display info of the last loaded module so
+// the Info dialog still works after Stop (decoder already closed).
+type moduleMeta struct {
+	formatID, formatName      string
+	name, artist, title, game string
+	songs, voices, duration   int
+}
+
 // engine owns the native decoder and the playback state.
 type engine struct {
 	mu       sync.Mutex // guards dec against reload while Read is in flight
@@ -43,6 +51,7 @@ type engine struct {
 	player   *oto.Player
 	filePath string
 	sub      int
+	meta     *moduleMeta
 
 	playing  atomic.Bool
 	paused   atomic.Bool
@@ -204,6 +213,7 @@ func main() {
 	playBtn := widget.NewButton("Play", nil)
 	pauseBtn := widget.NewButton("Pause", nil)
 	stopBtn := widget.NewButton("Stop", nil)
+	infoBtn := widget.NewButton("Info", nil)
 	prevSub := widget.NewButton("<", nil)
 	nextSub := widget.NewButton(">", nil)
 	loopChk := widget.NewCheck("loop", nil)
@@ -231,6 +241,9 @@ func main() {
 		playBtn.Enable()
 		if !loaded {
 			playBtn.Disable()
+			infoBtn.Disable()
+		} else {
+			infoBtn.Enable()
 		}
 		pauseBtn.Disable()
 		stopBtn.Disable()
@@ -274,6 +287,20 @@ func main() {
 				d.MuteVoice(i, c.Checked)
 			}
 		}
+
+		eng.mu.Lock()
+		eng.meta = &moduleMeta{
+			formatID:   d.FormatID(),
+			formatName: d.FormatName(),
+			name:       d.Name(),
+			artist:     d.Artist(),
+			title:      d.Title(),
+			game:       d.Game(),
+			songs:      d.Songs(),
+			voices:     d.Voices(),
+			duration:   int(d.Duration()),
+		}
+		eng.mu.Unlock()
 
 		eng.transition(d) // fade out old module, fade in the new one
 		for _, bar := range voiceBars {
@@ -415,6 +442,9 @@ func main() {
 
 	openBtn := widget.NewButton("Open…", openFile)
 	wavBtn := widget.NewButton("Export WAV", exportWav)
+	infoBtn.OnTapped = func() {
+		showModuleInfo(eng, w, panSlider.Value)
+	}
 
 	transport := container.NewHBox(playBtn, pauseBtn, stopBtn,
 		layout.NewSpacer(), prevSub, subLabel, nextSub, loopChk, filterChk)
@@ -440,7 +470,7 @@ func main() {
 
 	w.SetContent(container.NewBorder(
 		container.NewVBox(
-			container.NewHBox(openBtn, wavBtn, fileLabel),
+			container.NewHBox(openBtn, wavBtn, infoBtn, fileLabel),
 			infoLabel,
 			widget.NewSeparator(),
 		),

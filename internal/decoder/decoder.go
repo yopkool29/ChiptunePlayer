@@ -115,6 +115,20 @@ func (d *Decoder) Name() string {
 	return C.GoString(C.tfmxdec_get_name(d.p))
 }
 
+// Artist/Title/Game return metadata stored in TFMX-MOD files
+// (usually empty for other formats).
+func (d *Decoder) Artist() string {
+	return C.GoString(C.tfmxdec_get_artist(d.p))
+}
+
+func (d *Decoder) Title() string {
+	return C.GoString(C.tfmxdec_get_title(d.p))
+}
+
+func (d *Decoder) Game() string {
+	return C.GoString(C.tfmxdec_get_game(d.p))
+}
+
 // Voices returns the number of Paula voices in use.
 func (d *Decoder) Voices() int {
 	return int(C.tfmxdec_voices(d.p))
