@@ -1,7 +1,9 @@
 package main
 
 import (
+	"image"
 	"image/color"
+	"math"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -51,69 +53,82 @@ func (v *vuBar) MinSize() fyne.Size {
 	return fyne.NewSize(22, 150)
 }
 
-// vuStrips thin stacked rectangles form the continuous gradient.
-const vuStrips = 48
+var vuBgColor = color.NRGBA{0x08, 0x08, 0x30, 0xFF} // dark navy
 
-// Gradient stops, bottom to top: pure green on the lower half, then
-// yellow, orange, and red-orange only near the top.
-type vuStop struct {
-	t float64
-	c color.NRGBA
+// Hue ramp across the bar (t = 0 bottom → 1 top): stays green on the
+// lower half, then sweeps through yellow and orange to red at the top.
+var vuHueStops = [][2]float64{
+	{0.00, 122},
+	{0.42, 118},
+	{0.62, 60},
+	{0.82, 28},
+	{1.00, 8},
 }
 
-var vuStops = []vuStop{
-	{0.00, color.NRGBA{0x00, 0xC8, 0x10, 0xFF}},
-	{0.45, color.NRGBA{0x10, 0xD8, 0x08, 0xFF}},
-	{0.65, color.NRGBA{0xD8, 0xE0, 0x00, 0xFF}},
-	{0.82, color.NRGBA{0xFF, 0x90, 0x00, 0xFF}},
-	{1.00, color.NRGBA{0xFF, 0x30, 0x08, 0xFF}},
-}
-
-func lerp(a, b uint8, f float64) uint8 {
-	return a + uint8(float64(b-a)*f)
-}
-
-func stripColor(t float64) color.NRGBA {
-	lo := vuStops[0]
-	for _, s := range vuStops[1:] {
-		if t <= s.t {
-			f := (t - lo.t) / (s.t - lo.t)
-			return color.NRGBA{
-				lerp(lo.c.R, s.c.R, f),
-				lerp(lo.c.G, s.c.G, f),
-				lerp(lo.c.B, s.c.B, f),
-				0xFF,
-			}
+func hueAt(t float64) float64 {
+	lo := vuHueStops[0]
+	for _, s := range vuHueStops[1:] {
+		if t <= s[0] {
+			return lo[1] + (s[1]-lo[1])*(t-lo[0])/(s[0]-lo[0])
 		}
 		lo = s
 	}
-	return vuStops[len(vuStops)-1].c
+	return vuHueStops[len(vuHueStops)-1][1]
 }
 
-var vuBgColor = color.NRGBA{0x08, 0x08, 0x30, 0xFF} // dark navy
+func hsv(h, s, v float64) color.NRGBA {
+	h = math.Mod(h+360, 360) / 60
+	i := math.Floor(h)
+	f := h - i
+	p := v * (1 - s)
+	q := v * (1 - s*f)
+	u := v * (1 - s*(1-f))
+	var r, g, b float64
+	switch int(i) {
+	case 0:
+		r, g, b = v, u, p
+	case 1:
+		r, g, b = q, v, p
+	case 2:
+		r, g, b = p, v, u
+	case 3:
+		r, g, b = p, q, v
+	case 4:
+		r, g, b = u, p, v
+	default:
+		r, g, b = v, p, q
+	}
+	return color.NRGBA{uint8(r*255 + .5), uint8(g*255 + .5), uint8(b*255 + .5), 0xFF}
+}
+
+// vuGradientImg is a 1x256 smooth gradient, built once and stretched
+// onto each bar: GPU-filtered, zero banding.
+var vuGradientImg = func() image.Image {
+	const h = 256
+	img := image.NewNRGBA(image.Rect(0, 0, 1, h))
+	for y := 0; y < h; y++ {
+		t := 1 - float64(y)/float64(h-1) // y=0 is the top of the bar
+		img.SetNRGBA(0, y, hsv(hueAt(t), 0.95, 0.92))
+	}
+	return img
+}()
 
 func (v *vuBar) CreateRenderer() fyne.WidgetRenderer {
 	r := &vuRenderer{bar: v}
 	r.bg = canvas.NewRectangle(vuBgColor)
-	for i := 0; i < vuStrips; i++ {
-		t := float64(i) / float64(vuStrips-1)
-		r.strips = append(r.strips, canvas.NewRectangle(stripColor(t)))
-	}
+	r.grad = canvas.NewImageFromImage(vuGradientImg)
+	r.grad.FillMode = canvas.ImageFillStretch
 	r.cover = canvas.NewRectangle(vuBgColor)
-	r.objs = append(r.objs, r.bg)
-	for _, s := range r.strips {
-		r.objs = append(r.objs, s)
-	}
-	r.objs = append(r.objs, r.cover)
+	r.objs = []fyne.CanvasObject{r.bg, r.grad, r.cover}
 	return r
 }
 
 type vuRenderer struct {
-	bar    *vuBar
-	bg     *canvas.Rectangle
-	strips []*canvas.Rectangle
-	cover  *canvas.Rectangle
-	objs   []fyne.CanvasObject
+	bar   *vuBar
+	bg    *canvas.Rectangle
+	grad  *canvas.Image
+	cover *canvas.Rectangle
+	objs  []fyne.CanvasObject
 }
 
 func (r *vuRenderer) Objects() []fyne.CanvasObject { return r.objs }
@@ -122,18 +137,11 @@ func (r *vuRenderer) Destroy()                     {}
 func (r *vuRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
 	r.bg.Move(fyne.NewPos(0, 0))
-
-	innerH := size.Height
-	for i := 0; i < vuStrips; i++ {
-		// strip i, bottom-up; overlaps its neighbour by 1px to avoid seams
-		y0 := innerH - float32(i)*(innerH/vuStrips)
-		y1 := innerH - float32(i+1)*(innerH/vuStrips)
-		r.strips[i].Move(fyne.NewPos(0, y1))
-		r.strips[i].Resize(fyne.NewSize(size.Width, y0-y1+1))
-	}
+	r.grad.Resize(size)
+	r.grad.Move(fyne.NewPos(0, 0))
 
 	// pixel-precise cover hides the unlit top part
-	coverH := float32(1-r.bar.disp/100) * innerH
+	coverH := float32(1-r.bar.disp/100) * size.Height
 	r.cover.Move(fyne.NewPos(0, 0))
 	r.cover.Resize(fyne.NewSize(size.Width, coverH))
 }
