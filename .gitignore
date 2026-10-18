@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+lib/
+*.o
+*.a
+
+# Test modules (copyrighted, downloaded from modland.com)
+testdata/
+*.wav
+
+# DeliTracker archive & extraction (freeware, not ours to redistribute)
+DeliTracker232.lha
+extracted/
+
+# Reference sources (cloned upstream repos)
+reference/
