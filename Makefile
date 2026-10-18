@@ -9,7 +9,7 @@ LIB := lib/libtfmxdec.a
 
 .PHONY: all clean
 
-all: $(LIB) player
+all: $(LIB) player gui
 
 $(LIB): $(OBJS)
 	@mkdir -p lib
@@ -21,5 +21,8 @@ $(LIB): $(OBJS)
 player: $(LIB)
 	go build -o bin/amiga-player ./cmd/amiga-player
 
+gui: $(LIB)
+	go build -o bin/chiptune-gui ./cmd/chiptune-gui
+
 clean:
-	rm -f $(OBJS) $(LIB) bin/amiga-player
+	rm -f $(OBJS) $(LIB) bin/amiga-player bin/chiptune-gui

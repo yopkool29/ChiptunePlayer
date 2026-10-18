@@ -9,7 +9,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +23,7 @@ import (
 	"github.com/ebitengine/oto/v3"
 
 	"amiga-player/internal/decoder"
+	"amiga-player/internal/render"
 )
 
 var (
@@ -97,10 +97,15 @@ func main() {
 	}
 
 	if *flagWav != "" {
-		if err := renderWav(dec, *flagWav, *flagRate); err != nil {
+		written, err := render.ToWAV(dec, *flagWav, *flagRate, *flagDur, nil)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+		fmt.Printf("wrote %s (%s, %d bytes)\n",
+			filepath.Base(*flagWav),
+			(time.Duration(written/4)*time.Second/time.Duration(*flagRate)).Round(time.Second),
+			written+44)
 		return
 	}
 
@@ -148,67 +153,4 @@ func play(dec *decoder.Decoder, rate int) error {
 	}
 }
 
-// renderWav decodes the whole song into a 16-bit stereo WAV file.
-func renderWav(dec *decoder.Decoder, out string, rate int) error {
-	f, err := os.Create(out)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 
-	// Reserve space for the RIFF header, patched at the end.
-	if _, err := f.Write(make([]byte, 44)); err != nil {
-		return err
-	}
-
-	max := int64(*flagDur) * int64(rate) * 4 // bytes
-	if max <= 0 {
-		d := dec.Duration()
-		if d > 0 && d < 10*60*1000 {
-			max = (int64(d) + 1000) * int64(rate) * 4 / 1000
-		} else {
-			max = 10 * 60 * int64(rate) * 4 // safety cap: 10 min
-		}
-	}
-
-	buf := make([]byte, 65536)
-	var written int64
-	for written < max && !dec.SongEnd() {
-		chunk := int64(len(buf))
-		if rem := max - written; rem < chunk {
-			chunk = rem
-		}
-		dec.FillBuffer(buf[:chunk])
-		if _, err := f.Write(buf[:chunk]); err != nil {
-			return err
-		}
-		written += chunk
-	}
-
-	// Patch RIFF/WAVE header.
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	dataSize := uint32(written)
-	hdr := make([]byte, 44)
-	copy(hdr[0:4], "RIFF")
-	binary.LittleEndian.PutUint32(hdr[4:8], 36+dataSize)
-	copy(hdr[8:12], "WAVE")
-	copy(hdr[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(hdr[16:20], 16)
-	binary.LittleEndian.PutUint16(hdr[20:22], 1) // PCM
-	binary.LittleEndian.PutUint16(hdr[22:24], 2) // stereo
-	binary.LittleEndian.PutUint32(hdr[24:28], uint32(rate))
-	binary.LittleEndian.PutUint32(hdr[28:32], uint32(rate*4)) // byte rate
-	binary.LittleEndian.PutUint16(hdr[32:34], 4)              // block align
-	binary.LittleEndian.PutUint16(hdr[34:36], 16)             // bits
-	copy(hdr[36:40], "data")
-	binary.LittleEndian.PutUint32(hdr[40:44], dataSize)
-	if _, err := f.Write(hdr); err != nil {
-		return err
-	}
-
-	fmt.Printf("wrote %s (%s, %d bytes)\n",
-		filepath.Base(out), (time.Duration(written/4) * time.Second / time.Duration(rate)).Round(time.Second), written+44)
-	return nil
-}
