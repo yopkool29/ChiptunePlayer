@@ -16,6 +16,14 @@ Audacious, XMMS and GStreamer plugins. Audio output uses
 The player format research started from the original DeliTracker 2.32
 player modules (`TFMX`, `FC1.3_note`, `FC1.4_note`).
 
+## Download
+
+Pre-built Linux x86_64 binaries are on the
+[Releases](https://github.com/yopkool29/ChiptunePlayer/releases) page:
+
+- `ChiptunePlayer-*-linux-amd64.tar.gz` — `amiga-player` (CLI) + `chiptune-gui` (GUI)
+- `chiptuneplayer_*_amd64.deb` — installs both to `/usr/bin` plus a `.desktop` entry
+
 ## Build
 
 Requirements: Go ≥ 1.21, a C++ compiler, GNU make
