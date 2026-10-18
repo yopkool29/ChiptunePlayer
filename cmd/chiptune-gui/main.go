@@ -4,6 +4,8 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 	"github.com/ebitengine/oto/v3"
 
@@ -64,7 +67,7 @@ func (e *engine) Read(p []byte) (int, error) {
 }
 
 func main() {
-	a := app.New()
+	a := app.NewWithID("chiptuneplayer")
 	w := a.NewWindow("ChiptunePlayer")
 	w.Resize(fyne.NewSize(620, 420))
 
@@ -134,6 +137,9 @@ func main() {
 		stopBtn.Enable()
 	}
 
+	cwd, _ := os.Getwd()
+	startDir, _ := storage.ListerForURI(storage.NewFileURI(cwd))
+
 	loadModule := func(path string, sub int) {
 		d := decoder.New()
 		if err := d.Load(path, sub); err != nil {
@@ -149,6 +155,9 @@ func main() {
 		eng.mu.Unlock()
 		eng.filePath = path
 		eng.sub = sub
+		if lu, err := storage.ListerForURI(storage.NewFileURI(filepath.Dir(path))); err == nil {
+			startDir = lu
+		}
 
 		d.MixerInit(sampleRate, 16, 2, 0, int(panSlider.Value))
 		d.SetFiltering(filterChk.Checked)
@@ -181,6 +190,10 @@ func main() {
 			loadModule(rc.URI().Path(), 0)
 		}, w)
 		fd.SetFilter(&extFilter{exts: moduleExts})
+		if startDir != nil {
+			fd.SetLocation(startDir)
+		}
+		fd.Resize(fyne.NewSize(1000, 700))
 		fd.Show()
 	}
 
@@ -219,6 +232,10 @@ func main() {
 			}()
 		}, w)
 		sd.SetFileName("export.wav")
+		if startDir != nil {
+			sd.SetLocation(startDir)
+		}
+		sd.Resize(fyne.NewSize(1000, 700))
 		sd.Show()
 	}
 
