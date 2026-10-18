@@ -18,13 +18,27 @@ player modules (`TFMX`, `FC1.3_note`, `FC1.4_note`).
 
 ## Build
 
-Requirements: Go ≥ 1.21, a C++ compiler, GNU make.
+Requirements: Go ≥ 1.21, a C++ compiler, GNU make
+(the GUI additionally needs X11/OpenGL dev headers — `libgl1-mesa-dev xorg-dev`
+on Debian/Ubuntu).
 
 ```sh
-make          # builds clib/ → lib/libtfmxdec.a, then bin/amiga-player
+make          # builds clib/ → lib/libtfmxdec.a, then bin/amiga-player + bin/chiptune-gui
+make player   # CLI only
+make gui      # GUI only
 ```
 
-## Usage
+## GUI
+
+```sh
+./bin/chiptune-gui
+```
+
+Fyne-based desktop player: file picker, transport controls, seek slider,
+subsong navigation, loop / LED-filter / panning options, per-voice mute
+checkboxes with live volume meters, and WAV export.
+
+## CLI usage
 
 ```sh
 amiga-player module.fc                    # play
