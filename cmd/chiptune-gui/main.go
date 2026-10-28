@@ -38,21 +38,19 @@ const sampleRate = 44100
 // title, user-facing messages, quit dialog.
 const appName = "ChiptunePlayer"
 
-var moduleExts = []string{
-	"fc", "fc3", "fc4", "fc13", "fc14", "smod",
-	"hip", "hipc", "hip7", "mcmd",
-	"tfx", "tfm", "tfmx", "mdat", "sog", "soc", "s7g",
-	"mod", // TFMX-MOD files use this too; real ProTracker .mod will just fail to load
-	"ahx",
-}
-
 var modulePrefixes = []string{"mdat.", "mcmd."}
 
-// nonModuleExts are rendered-audio files that must never match a
-// module prefix (an exported "mdat.wav" is a WAV, not a module).
+// nonModuleExts are files that can never be a module: rendered
+// audio, packed archives, docs, icons, images.
 var nonModuleExts = map[string]bool{
 	".wav": true, ".mp3": true, ".ogg": true, ".flac": true,
 	".aiff": true, ".aif": true, ".mid": true, ".mp4": true,
+	".lha": true, ".lzh": true, ".lzx": true, ".zip": true,
+	".rar": true, ".7z": true, ".gz": true, ".adf": true,
+	".dms": true, ".info": true, ".txt": true, ".nfo": true,
+	".diz": true, ".doc": true, ".guide": true, ".pdf": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
+	".exe": true,
 }
 
 // moduleMeta snapshots the display info of the last loaded module so
@@ -125,6 +123,13 @@ func (e *engine) position() time.Duration {
 func (e *engine) transition(next audioDecoder) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// a pending fade-in we are about to drop must not leak: a forgotten
+	// DeliPlayer would hold the single emu slot and reject every later
+	// load with "already active"
+	if e.next != nil {
+		e.next.Close()
+		e.next = nil
+	}
 	if e.dec == nil || !e.playing.Load() || e.paused.Load() {
 		// nothing audible: swap immediately
 		if e.dec != nil {
@@ -270,32 +275,24 @@ var (
 	exportBusy atomic.Bool
 	loadErr    string
 
-	searchOn   bool
-	searchPat  string
-	searchHits []browseEntry
-	lastPat    string
-	lastDir    string
+	searchOn    bool
+	searchFocus bool
+	searchPat   string
+	searchHits  []browseEntry
+	lastPat     string
+	lastDir     string
 )
 
-// isModuleFile reports whether name looks like a loadable module:
-// known extension or AmigaDOS-style mdat.*/MCMD.* prefix.
+// isModuleFile reports whether name may be a loadable module.
+// Players probe by content, so listing is permissive: show
+// everything except known non-module files (rendered audio,
+// archives, docs, TFMX smpl.* pairs, dotfiles).
 func isModuleFile(name string) bool {
 	l := strings.ToLower(name)
-	if nonModuleExts[filepath.Ext(l)] {
+	if strings.HasPrefix(l, ".") || strings.HasPrefix(l, "smpl.") || strings.HasPrefix(l, "readme") {
 		return false
 	}
-	for _, p := range modulePrefixes {
-		if strings.HasPrefix(l, p) {
-			return true
-		}
-	}
-	ext := strings.ToLower(filepath.Ext(l))
-	for _, e := range moduleExts {
-		if ext == "."+e {
-			return true
-		}
-	}
-	return false
+	return !nonModuleExts[filepath.Ext(l)]
 }
 
 // browseEntry is one selectable row of the file browser.
@@ -339,15 +336,25 @@ func runSearch() {
 	lastDir = browseDir
 }
 
+// setBrowseDir moves the library browser and persists the choice
+// (config.json music_dir), so the app reopens where you left off.
+func setBrowseDir(p string) {
+	if p != "" && p != browseDir {
+		browseDir = p
+		saveConfig()
+	}
+}
+
 // pickDir opens a native directory chooser (zenity) to set the
 // library's start directory. Runs async so the frame loop stays free.
 func pickDir() {
 	go func() {
 		out, err := exec.Command("zenity", "--file-selection",
-			"--directory", "--title=Dossier de départ").Output()
+			"--directory", "--title=Dossier de départ",
+			"--filename="+browseDir+"/").Output()
 		if err == nil {
 			if p := strings.TrimSpace(string(out)); p != "" {
-				browseDir = p
+				setBrowseDir(p)
 			}
 		}
 	}()
@@ -434,6 +441,10 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 		eng.dec = nil
 		eng.playing.Store(false)
 	}
+	if _, isDeli := eng.next.(*deliplayer.Player); isDeli && eng.next != nil {
+		eng.next.Close()
+		eng.next = nil
+	}
 	eng.mu.Unlock()
 
 	d := decoder.New()
@@ -505,7 +516,7 @@ func applyLoadResult(r loadResult) {
 	d.SetFiltering(filterOn)
 	d.SetLoopMode(loopOn)
 	d.EndShorts(true, 5)
-	for i := range muted {
+	for i := 0; i < d.Voices() && i < len(muted); i++ {
 		d.MuteVoice(i, muted[i])
 	}
 
@@ -529,7 +540,7 @@ func applyLoadResult(r loadResult) {
 	}
 	eng.filePath = path
 	eng.sub = sub
-	browseDir = filepath.Dir(path)
+	setBrowseDir(filepath.Dir(path))
 
 	// suggested WAV name: for mdat.*/MCMD.* the real name sits after
 	// the AmigaDOS prefix
@@ -586,6 +597,69 @@ var (
 	accentHiCol = imgui.Vec4{X: 1.00, Y: 0.74, Z: 0.34, W: 1}
 	dimCol      = imgui.Vec4{X: 0.52, Y: 0.55, Z: 0.62, W: 1}
 )
+
+// faderSlider wraps SliderFloat and over-paints the grab with a
+// mixer-style cap: vertical metal gradient + outline + center groove.
+// The native grab is made invisible and the cap tracks ImGui's own
+// grab position (grab_padding=2 + GrabMinSize), so it stays aligned.
+func faderSlider(id string, v *float32, lo, hi, w float32, format string) bool {
+	imgui.PushStyleColorVec4(imgui.ColSliderGrab, imgui.Vec4{})
+	imgui.PushStyleColorVec4(imgui.ColSliderGrabActive, imgui.Vec4{})
+	imgui.SetNextItemWidth(w)
+	changed := imgui.SliderFloatV(id, v, lo, hi, "", 0)
+	imgui.PopStyleColorV(2)
+
+	mn, mx := imgui.ItemRectMin(), imgui.ItemRectMax()
+	t := min(1, max(0, (*v-lo)/(hi-lo)))
+	u32 := func(r, g, b float32) uint32 {
+		return imgui.ColorConvertFloat4ToU32(imgui.Vec4{X: r, Y: g, Z: b, W: 1})
+	}
+	grabSz := imgui.CurrentStyle().GrabMinSize()
+	cx := mn.X + 2 + grabSz/2 + t*((mx.X-mn.X)-4-grabSz)
+	cw := grabSz + 6 // visual cap wider than the logical grab
+	gmin := imgui.Vec2{X: cx - cw/2, Y: mn.Y - 1}
+	gmax := imgui.Vec2{X: cx + cw/2, Y: mx.Y + 1}
+	dl := imgui.WindowDrawList()
+	ct, cb := u32(0.66, 0.71, 0.77), u32(0.28, 0.30, 0.34)
+	dl.AddRectFilledMultiColor(
+		imgui.Vec2{X: gmin.X + 1, Y: gmin.Y + 1},
+		imgui.Vec2{X: gmax.X - 1, Y: gmax.Y - 1}, ct, ct, cb, cb)
+	dl.AddRectV(gmin, gmax, u32(0.09, 0.10, 0.12), 3, 0, 1.5)
+	dl.AddLineV(imgui.Vec2{X: cx, Y: gmin.Y + 3}, imgui.Vec2{X: cx, Y: gmax.Y - 3},
+		u32(0.11, 0.12, 0.14), 1.5)
+	if format != "" && imgui.IsItemActive() {
+		label := fmt.Sprintf(format, *v)
+		ts := imgui.CalcTextSize(label)
+		dl.AddTextVec2(imgui.Vec2{X: mn.X + (mx.X-mn.X-ts.X)/2,
+			Y: mn.Y + (mx.Y - mn.Y - ts.Y) / 2},
+			imgui.ColorConvertFloat4ToU32(imgui.CurrentStyle().Colors()[imgui.ColText]), label)
+	}
+	return changed
+}
+
+// popupDismiss closes the current popup on ESC or on a click outside
+// its window. Use as the first widget of every popup Layout so all
+// dialogs share the behavior.
+func popupDismiss(open *bool) func() { return popupDismissCb(open, nil) }
+
+// popupDismissCb is popupDismiss plus a callback fired on dismiss —
+// Config uses it to restore the values it edits live.
+func popupDismissCb(open *bool, onClose func()) func() {
+	return func() {
+		if imgui.IsWindowAppearing() {
+			return // don't eat the click that opened us
+		}
+		if imgui.IsKeyPressedBoolV(imgui.KeyEscape, false) ||
+			(imgui.IsMouseClickedBool(imgui.MouseButtonLeft) &&
+				!imgui.IsWindowHoveredV(imgui.HoveredFlagsRootAndChildWindows)) {
+			imgui.CloseCurrentPopup()
+			*open = false
+			if onClose != nil {
+				onClose()
+			}
+		}
+	}
+}
 
 func fileLine() string {
 	if eng.filePath == "" {
@@ -704,7 +778,7 @@ func titleBar() g.Widget {
 
 		avail := imgui.ContentRegionAvail().X
 		const volW = 138        // speaker + slider + gear reserved zone
-		const rightMargin = 12  // breathing room after the ✕ button
+		const rightMargin = 0  // window padding already gives the gap after ✕
 		imgui.InvisibleButton("##wdrag",
 			imgui.Vec2{X: avail - 3*(24+6) - volW - rightMargin, Y: titleH})
 		if imgui.IsItemActive() && imgui.IsMouseDragging(0) {
@@ -728,8 +802,7 @@ func titleBar() g.Widget {
 			(vp.X+imgui.ItemRectMax().X)/2+1, vp.Y+11, volMuted)
 		imgui.SameLine()
 		imgui.SetCursorPosY(imgui.CursorPosY() + (titleH-20)/2 - lift)
-		imgui.SetNextItemWidth(82)
-		if imgui.SliderFloatV("##vol", &volV, 0, 100, "", 0) {
+		if faderSlider("##vol", &volV, 0, 100, 82, "") {
 			if volMuted {
 				volMuted = false // sliding un-mutes
 			}
@@ -740,6 +813,7 @@ func titleBar() g.Widget {
 		// config gear next to the volume
 		imgui.SetCursorPosY(imgui.CursorPosY() + (titleH-24)/2 - lift)
 		iconButtonS("cfg", iconGear, 24, false, func() {
+			cfgSavedExport, cfgSavedVu = exportPath, cfg.VuSyncMs
 			configOpen = true
 			g.OpenPopup("Config")
 		})
@@ -841,8 +915,7 @@ func positionRow() g.Widget {
 		if max < 1 {
 			max = 1
 		}
-		imgui.SetNextItemWidth(430)
-		imgui.SliderFloatV("##pos", &posV, 0, max, "", 0)
+		faderSlider("##pos", &posV, 0, max, 430, "")
 		if imgui.IsItemActive() {
 			seeking = true
 		}
@@ -881,17 +954,17 @@ func vuDraw(i int) g.Widget {
 }
 
 func voicesPanel() g.Widget {
-	cols := make([]g.Widget, 0, 8)
-	for i := 0; i < 8; i++ {
+	cols := make([]g.Widget, 0, nVoices)
+	for i := 0; i < nVoices; i++ {
 		v := i
 		cols = append(cols, g.Column(
 			vuDraw(v),
 			g.Custom(func() {
-				imgui.BeginDisabledV(v >= nVoices)
-				g.Checkbox(fmt.Sprintf("V%d", v), &muted[v]).OnChange(func() {
+				on := !muted[v]
+				if imgui.Checkbox(fmt.Sprintf("V%d", v), &on) {
+					muted[v] = !on
 					withDec(func(d audioDecoder) { d.MuteVoice(v, muted[v]) })
-				}).Build()
-				imgui.EndDisabled()
+				}
 			}),
 		))
 	}
@@ -911,6 +984,17 @@ var (
 	exportBrowseCh = make(chan string, 1)
 	exportBrowsing bool
 )
+
+// cfgSaved* snapshot the live-edited values when the Config popup
+// opens; any close path other than Save restores them.
+var (
+	cfgSavedExport string
+	cfgSavedVu     int
+)
+
+func configRestore() {
+	exportPath, cfg.VuSyncMs = cfgSavedExport, cfgSavedVu
+}
 
 // configPopupLayout: export path field + hint about config.json.
 func configPopupLayout() []g.Widget {
@@ -950,9 +1034,8 @@ func configPopupLayout() []g.Widget {
 		g.Row(
 			dimText("vu sync"),
 			g.Custom(func() {
-				imgui.SetNextItemWidth(200)
 				v := float32(cfg.VuSyncMs)
-				if imgui.SliderFloatV("##vusync", &v, 5, 800, "%.0f ms", 0) {
+				if faderSlider("##vusync", &v, 5, 800, 200, "%.0f ms") {
 					cfg.VuSyncMs = int(v)
 				}
 			}),
@@ -971,6 +1054,7 @@ func configPopupLayout() []g.Widget {
 			})
 			imgui.SameLine()
 			bevelButton("cfgclose", "Close", false, func() {
+				configRestore()
 				configOpen = false
 			})
 		}),
@@ -1073,7 +1157,7 @@ func browserPanel() g.Widget {
 			Selected(e.path == eng.filePath).
 			OnClick(func() {
 				if e.isDir {
-					browseDir = e.path
+					setBrowseDir(e.path)
 					searchPat = ""
 					return
 				}
@@ -1097,6 +1181,12 @@ func browserPanel() g.Widget {
 		}
 		searchRow = g.Row(
 			centered("Search", false),
+			g.Custom(func() {
+				if searchFocus {
+					imgui.SetKeyboardFocusHereV(0)
+					searchFocus = false
+				}
+			}),
 			g.InputText(&searchPat).Size(190).Hint("pattern…"),
 			g.Custom(func() {
 				// compact ✕, sized to the input frame
@@ -1112,12 +1202,24 @@ func browserPanel() g.Widget {
 		)
 	}
 
+	closeSearch := func() { searchOn, searchPat, searchHits = false, "", nil }
+
 	return g.Column(
+		g.Custom(func() {
+			if imgui.IsKeyChordPressed(imgui.KeyChord(imgui.ModCtrl | imgui.KeyF)) {
+				searchOn, searchFocus = true, true
+			}
+			// ESC closes the search row unless a modal popup is up
+			if searchOn && !infoOpen && !configOpen && !quitAsk &&
+				imgui.IsKeyPressedBoolV(imgui.KeyEscape, false) {
+				closeSearch()
+			}
+		}),
 		g.Row(
 			g.Custom(func() {
 				bevelButton("up", "↑", false, func() {
 					if p := filepath.Dir(browseDir); p != browseDir {
-						browseDir = p
+						setBrowseDir(p)
 						searchPat = ""
 					}
 				})
@@ -1132,9 +1234,10 @@ func browserPanel() g.Widget {
 				imgui.SameLine()
 				iconButton("srch", iconSearch, false, func() {
 					searchOn = !searchOn
-					if !searchOn {
-						searchPat = ""
-						searchHits = nil
+					if searchOn {
+						searchFocus = true
+					} else {
+						closeSearch()
 					}
 				})
 			}),
@@ -1275,8 +1378,7 @@ func loop() {
 		g.Row(
 			dimText("pan"),
 			g.Custom(func() {
-				imgui.SetNextItemWidth(300)
-				if imgui.SliderFloatV("##pan", &panV, 0, 100, "%.0f%%", 0) {
+				if faderSlider("##pan", &panV, 0, 100, 300, "%.0f%%") {
 					withDec(func(d audioDecoder) { d.SetPanning(int(panV)) })
 				}
 			}),
@@ -1322,12 +1424,15 @@ func loop() {
 			g.Child().Size(536, -1).Border(true).Layout(left...),
 			g.Child().Size(360, -1).Border(true).Layout(right...),
 		),
-		g.PopupModal("Module info").IsOpen(&infoOpen).Layout(moduleInfoLayout(eng)...),
-		g.PopupModal("Config").IsOpen(&configOpen).Layout(configPopupLayout()...),
+		g.PopupModal("Module info").IsOpen(&infoOpen).Layout(append(
+			[]g.Widget{g.Custom(popupDismiss(&infoOpen))}, moduleInfoLayout(eng)...)...),
+		g.PopupModal("Config").IsOpen(&configOpen).Layout(append(
+			[]g.Widget{g.Custom(popupDismissCb(&configOpen, configRestore))}, configPopupLayout()...)...),
 		g.Custom(func() {
 			imgui.SetNextWindowSizeV(imgui.Vec2{X: 240, Y: 140}, imgui.CondAlways)
 		}),
-		g.PopupModal("Quit?").IsOpen(&quitAsk).Layout(quitPopupLayout()...),
+		g.PopupModal("Quit?").IsOpen(&quitAsk).Layout(append(
+			[]g.Widget{g.Custom(popupDismiss(&quitAsk))}, quitPopupLayout()...)...),
 	)
 }
 
@@ -1357,7 +1462,7 @@ func main() {
 		SampleRate:   sampleRate,
 		ChannelCount: 2,
 		Format:       oto.FormatSignedInt16LE,
-		BufferSize:   120 * time.Millisecond,
+		BufferSize:   60 * time.Millisecond,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "audio device:", err)
@@ -1381,6 +1486,11 @@ func main() {
 	browseDir = cwd
 	if fi, err := os.Stat(filepath.Join(cwd, "testdata")); err == nil && fi.IsDir() {
 		browseDir = filepath.Join(cwd, "testdata")
+	}
+	if cfg.MusicDir != "" {
+		if fi, err := os.Stat(cfg.MusicDir); err == nil && fi.IsDir() {
+			browseDir = cfg.MusicDir
+		}
 	}
 	if len(os.Args) > 1 {
 		if abs, err := filepath.Abs(os.Args[1]); err == nil {
