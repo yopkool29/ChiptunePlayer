@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="190" viewBox="0 0 1000 190">
+  <defs>
+    <filter id="glow" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="7"/></filter>
+    <filter id="soft"><feGaussianBlur stdDeviation=".6"/></filter>
+    <radialGradient id="flare">
+      <stop offset="0" stop-color="#fff"/><stop offset=".4" stop-color="#ffe9b0" stop-opacity=".8"/>
+      <stop offset="1" stop-color="#ff9a20" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" x2="1">
+      <stop offset="0" stop-color="#ff9a20" stop-opacity="0"/><stop offset="1" stop-color="#ffd27a"/>
+    </linearGradient>
+    <linearGradient id="barR" x1="1" x2="0">
+      <stop offset="0" stop-color="#ff9a20" stop-opacity="0"/><stop offset="1" stop-color="#ffd27a"/>
+    </linearGradient>
+    
+    <linearGradient id="chromeA" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".22" stop-color="#e6ecf5"/>
+      <stop offset=".44" stop-color="#bcc4d2"/>
+      <stop offset=".49" stop-color="#868ea0"/>
+      <stop offset=".50" stop-color="#7a4210"/>
+      <stop offset=".54" stop-color="#d08424"/>
+      <stop offset=".70" stop-color="#ffb840"/>
+      <stop offset=".86" stop-color="#ffe2a0"/>
+      <stop offset="1" stop-color="#fff3d0"/>
+    </linearGradient>
+    <linearGradient id="rimA" gradientUnits="userSpaceOnUse" x1="0" y1="-6" x2="0" y2="106">
+      <stop offset="0" stop-color="#fff6c8"/>
+      <stop offset=".35" stop-color="#f0b040"/>
+      <stop offset=".5" stop-color="#c47a26"/>
+      <stop offset=".7" stop-color="#ffb030"/>
+      <stop offset="1" stop-color="#a85a14"/>
+    </linearGradient>
+    <linearGradient id="shineA" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9"/>
+      <stop offset=".08" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    
+    <linearGradient id="chromeB" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".22" stop-color="#e6ecf5"/>
+      <stop offset=".44" stop-color="#bcc4d2"/>
+      <stop offset=".49" stop-color="#868ea0"/>
+      <stop offset=".50" stop-color="#7a4210"/>
+      <stop offset=".54" stop-color="#d08424"/>
+      <stop offset=".70" stop-color="#ffb840"/>
+      <stop offset=".86" stop-color="#ffe2a0"/>
+      <stop offset="1" stop-color="#fff3d0"/>
+    </linearGradient>
+    <linearGradient id="rimB" gradientUnits="userSpaceOnUse" x1="0" y1="-6" x2="0" y2="106">
+      <stop offset="0" stop-color="#fff6c8"/>
+      <stop offset=".35" stop-color="#f0b040"/>
+      <stop offset=".5" stop-color="#c47a26"/>
+      <stop offset=".7" stop-color="#ffb030"/>
+      <stop offset="1" stop-color="#a85a14"/>
+    </linearGradient>
+    <linearGradient id="shineB" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9"/>
+      <stop offset=".08" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="#000"/>
+  <g transform="translate(46.5,45) skewX(-6)">
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90 M94,10 L94,90 M144,10 L144,90 M94,50 L144,50 M178,10 L178,90 M212,90 L212,10 L247,10 L262,25 L262,42 L247,57 L212,57 M296,10 L346,10 M321,10 L321,90 M380,10 L380,75 L395,90 L415,90 L430,75 L430,10 M464,10 L464,90 M514,10 L514,90 M471,20 L507,80 M598,10 L548,10 L548,90 L598,90 M548,50 L586,50" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="#ff8a00" stroke-width="36" opacity=".55" filter="url(#glow)"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90 M94,10 L94,90 M144,10 L144,90 M94,50 L144,50 M178,10 L178,90 M212,90 L212,10 L247,10 L262,25 L262,42 L247,57 L212,57 M296,10 L346,10 M321,10 L321,90 M380,10 L380,75 L395,90 L415,90 L430,75 L430,10 M464,10 L464,90 M514,10 L514,90 M471,20 L507,80 M598,10 L548,10 L548,90 L598,90 M548,50 L586,50" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#rimA)" stroke-width="28"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90 M94,10 L94,90 M144,10 L144,90 M94,50 L144,50 M178,10 L178,90 M212,90 L212,10 L247,10 L262,25 L262,42 L247,57 L212,57 M296,10 L346,10 M321,10 L321,90 M380,10 L380,75 L395,90 L415,90 L430,75 L430,10 M464,10 L464,90 M514,10 L514,90 M471,20 L507,80 M598,10 L548,10 L548,90 L598,90 M548,50 L586,50" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="#2a1404" stroke-width="22"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90 M94,10 L94,90 M144,10 L144,90 M94,50 L144,50 M178,10 L178,90 M212,90 L212,10 L247,10 L262,25 L262,42 L247,57 L212,57 M296,10 L346,10 M321,10 L321,90 M380,10 L380,75 L395,90 L415,90 L430,75 L430,10 M464,10 L464,90 M514,10 L514,90 M471,20 L507,80 M598,10 L548,10 L548,90 L598,90 M548,50 L586,50" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#chromeA)" stroke-width="20"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90 M94,10 L94,90 M144,10 L144,90 M94,50 L144,50 M178,10 L178,90 M212,90 L212,10 L247,10 L262,25 L262,42 L247,57 L212,57 M296,10 L346,10 M321,10 L321,90 M380,10 L380,75 L395,90 L415,90 L430,75 L430,10 M464,10 L464,90 M514,10 L514,90 M471,20 L507,80 M598,10 L548,10 L548,90 L598,90 M548,50 L586,50" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#shineA)" stroke-width="20" opacity=".9"/>
+  </g>
+  <g transform="translate(688.5,95.0) scale(0.5) skewX(-6)">
+    <path d="M10,90 L10,10 L45,10 L60,25 L60,42 L45,57 L10,57 M102,10 L102,90 L152,90 M194,90 L194,30 L214,10 L224,10 L244,30 L244,90 M194,60 L244,60 M286,10 L286,35 L301,50 L321,50 L336,35 L336,10 M311,50 L311,90 M428,10 L378,10 L378,90 L428,90 M378,50 L416,50 M470,90 L470,10 L505,10 L520,25 L520,40 L505,55 L470,55 M504,62 L520,76 L520,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="#ff8a00" stroke-width="36" opacity=".55" filter="url(#glow)"/>
+    <path d="M10,90 L10,10 L45,10 L60,25 L60,42 L45,57 L10,57 M102,10 L102,90 L152,90 M194,90 L194,30 L214,10 L224,10 L244,30 L244,90 M194,60 L244,60 M286,10 L286,35 L301,50 L321,50 L336,35 L336,10 M311,50 L311,90 M428,10 L378,10 L378,90 L428,90 M378,50 L416,50 M470,90 L470,10 L505,10 L520,25 L520,40 L505,55 L470,55 M504,62 L520,76 L520,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#rimB)" stroke-width="28"/>
+    <path d="M10,90 L10,10 L45,10 L60,25 L60,42 L45,57 L10,57 M102,10 L102,90 L152,90 M194,90 L194,30 L214,10 L224,10 L244,30 L244,90 M194,60 L244,60 M286,10 L286,35 L301,50 L321,50 L336,35 L336,10 M311,50 L311,90 M428,10 L378,10 L378,90 L428,90 M378,50 L416,50 M470,90 L470,10 L505,10 L520,25 L520,40 L505,55 L470,55 M504,62 L520,76 L520,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="#2a1404" stroke-width="22"/>
+    <path d="M10,90 L10,10 L45,10 L60,25 L60,42 L45,57 L10,57 M102,10 L102,90 L152,90 M194,90 L194,30 L214,10 L224,10 L244,30 L244,90 M194,60 L244,60 M286,10 L286,35 L301,50 L321,50 L336,35 L336,10 M311,50 L311,90 M428,10 L378,10 L378,90 L428,90 M378,50 L416,50 M470,90 L470,10 L505,10 L520,25 L520,40 L505,55 L470,55 M504,62 L520,76 L520,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#chromeB)" stroke-width="20"/>
+    <path d="M10,90 L10,10 L45,10 L60,25 L60,42 L45,57 L10,57 M102,10 L102,90 L152,90 M194,90 L194,30 L214,10 L224,10 L244,30 L244,90 M194,60 L244,60 M286,10 L286,35 L301,50 L321,50 L336,35 L336,10 M311,50 L311,90 M428,10 L378,10 L378,90 L428,90 M378,50 L416,50 M470,90 L470,10 L505,10 L520,25 L520,40 L505,55 L470,55 M504,62 L520,76 L520,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#shineB)" stroke-width="20" opacity=".9"/>
+  </g>
+  <rect x="692.5" y="51" width="261.0" height="4" fill="url(#barR)"/>
+  <rect x="690.5" y="67" width="159.0" height="3" fill="url(#barR)" opacity=".7"/>
+  
+    <g transform="translate(68.5,53)" filter="url(#soft)">
+      <circle r="9.1" fill="url(#flare)"/>
+      <path d="M0,-26 L2.08,0 L0,26 L-2.08,0 Z M-26,0 L0,2.08 L26,0 L0,-2.08 Z" fill="#fff"/>
+    </g>
+    <g transform="translate(624.5,137)" filter="url(#soft)">
+      <circle r="7.0" fill="url(#flare)"/>
+      <path d="M0,-20 L1.6,0 L0,20 L-1.6,0 Z M-20,0 L0,1.6 L20,0 L0,-1.6 Z" fill="#fff"/>
+    </g>
+    <g transform="translate(953.5,53)" filter="url(#soft)">
+      <circle r="5.6" fill="url(#flare)"/>
+      <path d="M0,-16 L1.28,0 L0,16 L-1.28,0 Z M-16,0 L0,1.28 L16,0 L0,-1.28 Z" fill="#fff"/>
+    </g>
+</svg>

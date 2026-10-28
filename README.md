@@ -42,9 +42,10 @@ make gui      # GUI only
 ./bin/chiptune-gui
 ```
 
-Fyne-based desktop player: file picker, transport controls, seek slider,
+Dear ImGui desktop player ([giu](https://github.com/AllenDang/giu) +
+OpenGL): embedded module browser, icon transport controls, seek slider,
 subsong navigation, loop / LED-filter / panning options, per-voice mute
-checkboxes with live volume meters, and WAV export.
+checkboxes with live VU meters, module-info popup, and WAV export.
 
 ## CLI usage
 

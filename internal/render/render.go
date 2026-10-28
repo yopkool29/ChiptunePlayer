@@ -5,15 +5,20 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
-
-	"amiga-player/internal/decoder"
 )
+
+// PCMRenderer is the render surface a decoder backend must provide.
+type PCMRenderer interface {
+	FillBuffer([]byte)
+	SongEnd() bool
+	Duration() uint32
+}
 
 // ToWAV decodes the whole song into a 16-bit stereo WAV file.
 // maxSec <= 0 uses the module duration (10 min safety cap).
 // progress (may be nil) is called with the rendered duration in ms.
 // Returns the number of PCM bytes written.
-func ToWAV(dec *decoder.Decoder, out string, rate, maxSec int, progress func(ms int)) (int64, error) {
+func ToWAV(dec PCMRenderer, out string, rate, maxSec int, progress func(ms int)) (int64, error) {
 	f, err := os.Create(out)
 	if err != nil {
 		return 0, err

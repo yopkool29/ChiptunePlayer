@@ -1,31 +1,22 @@
 package main
 
 import (
-	"image"
 	"image/color"
 	"math"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/canvas"
-	"fyne.io/fyne/v2/widget"
+	"github.com/AllenDang/cimgui-go/imgui"
 )
 
-// vuBar is a continuous vertical VU-meter widget in classic Amiga
-// tracker style: a smooth green -> yellow -> red gradient on a dark
-// navy background, with VU ballistics (instant attack, smooth release).
+// vuBar is a continuous vertical VU-meter drawn on the imgui draw list,
+// in classic Amiga tracker style: a smooth green -> yellow -> red
+// gradient on a dark navy background, with VU ballistics (instant
+// attack, smooth release). Feed it once per frame.
 type vuBar struct {
-	widget.BaseWidget
 	target float64 // latest measured value 0..100
 	disp   float64 // displayed value (smoothed)
 }
 
-func newVUBar() *vuBar {
-	v := &vuBar{}
-	v.ExtendBaseWidget(v)
-	return v
-}
-
-// SetValue feeds the meter; call at ~30 Hz for smooth animation.
+// SetValue feeds the meter; call once per frame for smooth animation.
 func (v *vuBar) SetValue(f float64) {
 	if f > 100 {
 		f = 100
@@ -39,18 +30,48 @@ func (v *vuBar) SetValue(f float64) {
 	} else {
 		v.disp += (f - v.disp) * 0.18 // smooth release
 	}
-	v.Refresh()
 }
 
 // Reset clears the meter instantly (module change, stop…).
 func (v *vuBar) Reset() {
 	v.target = 0
 	v.disp = 0
-	v.Refresh()
 }
 
-func (v *vuBar) MinSize() fyne.Size {
-	return fyne.NewSize(22, 150)
+// drawVU renders the bar on the window draw list inside the rect at
+// (x,y,w,h). Full gradient is drawn, then the unlit top is covered
+// with the background color — pixel-precise, same trick as the fyne
+// version.
+func drawVU(dl *imgui.DrawList, x, y, w, h, disp float32) {
+	bg := colU32(vuBgColor)
+
+	// 32 strips for a band-free gradient; top of bar = t 1, bottom = t 0
+	const strips = 32
+	for s := 0; s < strips; s++ {
+		t := float64(s+1) / strips
+		y0 := y + h*float32(1-t)
+		y1 := y + h*float32(1-float64(s)/strips)
+		c := hsv(hueAt(t), 0.95, 0.92)
+		dl.AddRectFilled(
+			imgui.Vec2{X: x, Y: y0},
+			imgui.Vec2{X: x + w, Y: y1},
+			colU32(c))
+	}
+
+	// cover hides the unlit top
+	coverH := h * (1 - disp/100)
+	if coverH > 0.5 {
+		dl.AddRectFilled(
+			imgui.Vec2{X: x, Y: y},
+			imgui.Vec2{X: x + w, Y: y + coverH},
+			bg)
+	}
+
+	// hairline frame
+	dl.AddRectV(
+		imgui.Vec2{X: x, Y: y},
+		imgui.Vec2{X: x + w, Y: y + h},
+		colU32(color.NRGBA{0x3a, 0x3a, 0x5a, 0xFF}), 0, 0, 1)
 }
 
 var vuBgColor = color.NRGBA{0x08, 0x08, 0x30, 0xFF} // dark navy
@@ -101,56 +122,11 @@ func hsv(h, s, v float64) color.NRGBA {
 	return color.NRGBA{uint8(r*255 + .5), uint8(g*255 + .5), uint8(b*255 + .5), 0xFF}
 }
 
-// vuGradientImg is a 1x256 smooth gradient, built once and stretched
-// onto each bar: GPU-filtered, zero banding.
-var vuGradientImg = func() image.Image {
-	const h = 256
-	img := image.NewNRGBA(image.Rect(0, 0, 1, h))
-	for y := 0; y < h; y++ {
-		t := 1 - float64(y)/float64(h-1) // y=0 is the top of the bar
-		img.SetNRGBA(0, y, hsv(hueAt(t), 0.95, 0.92))
-	}
-	return img
-}()
-
-func (v *vuBar) CreateRenderer() fyne.WidgetRenderer {
-	r := &vuRenderer{bar: v}
-	r.bg = canvas.NewRectangle(vuBgColor)
-	r.grad = canvas.NewImageFromImage(vuGradientImg)
-	r.grad.FillMode = canvas.ImageFillStretch
-	r.cover = canvas.NewRectangle(vuBgColor)
-	r.objs = []fyne.CanvasObject{r.bg, r.grad, r.cover}
-	return r
-}
-
-type vuRenderer struct {
-	bar   *vuBar
-	bg    *canvas.Rectangle
-	grad  *canvas.Image
-	cover *canvas.Rectangle
-	objs  []fyne.CanvasObject
-}
-
-func (r *vuRenderer) Objects() []fyne.CanvasObject { return r.objs }
-func (r *vuRenderer) Destroy()                     {}
-
-func (r *vuRenderer) Layout(size fyne.Size) {
-	r.bg.Resize(size)
-	r.bg.Move(fyne.NewPos(0, 0))
-	r.grad.Resize(size)
-	r.grad.Move(fyne.NewPos(0, 0))
-
-	// pixel-precise cover hides the unlit top part
-	coverH := float32(1-r.bar.disp/100) * size.Height
-	r.cover.Move(fyne.NewPos(0, 0))
-	r.cover.Resize(fyne.NewSize(size.Width, coverH))
-}
-
-func (r *vuRenderer) MinSize() fyne.Size {
-	return r.bar.MinSize()
-}
-
-func (r *vuRenderer) Refresh() {
-	r.Layout(r.bar.Size())
-	canvas.Refresh(r.bar)
+func colU32(c color.NRGBA) uint32 {
+	return imgui.ColorConvertFloat4ToU32(imgui.Vec4{
+		X: float32(c.R) / 255,
+		Y: float32(c.G) / 255,
+		Z: float32(c.B) / 255,
+		W: float32(c.A) / 255,
+	})
 }

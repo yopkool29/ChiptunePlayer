@@ -15,3 +15,4 @@ extracted/
 # Reference sources (cloned upstream repos)
 reference/
 bin.tar.gz
+*.zip

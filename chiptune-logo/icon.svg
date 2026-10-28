@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 160 160">
+  <defs>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="7"/></filter>
+    <linearGradient id="chromeA" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".22" stop-color="#e6ecf5"/>
+      <stop offset=".44" stop-color="#bcc4d2"/>
+      <stop offset=".49" stop-color="#868ea0"/>
+      <stop offset=".50" stop-color="#7a4210"/>
+      <stop offset=".54" stop-color="#d08424"/>
+      <stop offset=".70" stop-color="#ffb840"/>
+      <stop offset=".86" stop-color="#ffe2a0"/>
+      <stop offset="1" stop-color="#fff3d0"/>
+    </linearGradient>
+    <linearGradient id="rimA" gradientUnits="userSpaceOnUse" x1="0" y1="-6" x2="0" y2="106">
+      <stop offset="0" stop-color="#fff6c8"/>
+      <stop offset=".35" stop-color="#f0b040"/>
+      <stop offset=".5" stop-color="#c47a26"/>
+      <stop offset=".7" stop-color="#ffb030"/>
+      <stop offset="1" stop-color="#a85a14"/>
+    </linearGradient>
+    <linearGradient id="shineA" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9"/>
+      <stop offset=".08" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="156" height="156" rx="26" fill="#14161c"/>
+  <rect x="2" y="2" width="156" height="156" rx="26" fill="none" stroke="#2a2e3a" stroke-width="3"/>
+  <g transform="translate(46,34) scale(0.92) skewX(-6)">
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="#ff8a00" stroke-width="36" opacity=".55" filter="url(#glow)"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#rimA)" stroke-width="28"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="#2a1404" stroke-width="22"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#chromeA)" stroke-width="20"/>
+    <path d="M62,10 L25,10 L10,25 L10,75 L25,90 L62,90" fill="none" stroke-linejoin="miter" stroke-miterlimit="10" stroke-linecap="square" stroke="url(#shineA)" stroke-width="20" opacity=".9"/>
+  </g>
+</svg>

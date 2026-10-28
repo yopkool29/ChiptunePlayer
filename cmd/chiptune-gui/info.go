@@ -6,10 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/widget"
+	"github.com/AllenDang/cimgui-go/imgui"
+	g "github.com/AllenDang/giu"
 )
 
 // deliPlayerFor maps the detected format to the DeliTracker II player
@@ -60,52 +58,63 @@ func humanSize(n int64) string {
 	}
 }
 
-// showModuleInfo opens a dialog describing the loaded module and the
-// player technology behind it. Uses the metadata snapshot so it also
-// works while stopped.
-func showModuleInfo(eng *engine, w fyne.Window, pan float64) {
+// moduleInfoLayout builds the popup body describing the loaded module
+// and the player technology behind it. Uses the metadata snapshot so
+// it also works while stopped.
+func moduleInfoLayout(eng *engine) []g.Widget {
 	eng.mu.Lock()
 	m := eng.meta
 	sub := eng.sub
 	path := eng.filePath
 	eng.mu.Unlock()
 	if m == nil {
-		return
+		return nil
 	}
 
-	items := []*widget.FormItem{
-		widget.NewFormItem("File", widget.NewLabel(path)),
+	rows := []g.Widget{
+		rowKV("File", path),
 	}
 	if fi, err := os.Stat(path); err == nil {
-		items = append(items, widget.NewFormItem("Size", widget.NewLabel(humanSize(fi.Size()))))
+		rows = append(rows, rowKV("Size", humanSize(fi.Size())))
 	}
 	if s := m.name; s != "" {
-		items = append(items, widget.NewFormItem("Name", widget.NewLabel(s)))
+		rows = append(rows, rowKV("Name", s))
 	}
 	if s := m.artist; s != "" {
-		items = append(items, widget.NewFormItem("Artist", widget.NewLabel(s)))
+		rows = append(rows, rowKV("Artist", s))
 	}
 	if s := m.title; s != "" {
-		items = append(items, widget.NewFormItem("Title", widget.NewLabel(s)))
+		rows = append(rows, rowKV("Title", s))
 	}
 	if s := m.game; s != "" {
-		items = append(items, widget.NewFormItem("Game", widget.NewLabel(s)))
+		rows = append(rows, rowKV("Game", s))
 	}
-	items = append(items,
-		widget.NewFormItem("Format", widget.NewLabel(m.formatName)),
-		widget.NewFormItem("Format ID", widget.NewLabel(m.formatID)),
-		widget.NewFormItem("DeliPlayer", widget.NewLabel(deliPlayerFor(m.formatID, m.formatName))),
-		widget.NewFormItem("Decoder", widget.NewLabel(decoderEngine(m.formatName)+" (C++)")),
-		widget.NewFormItem("Voices", widget.NewLabel(fmt.Sprintf("%d (Paula)", m.voices))),
-		widget.NewFormItem("Subsongs", widget.NewLabel(fmt.Sprintf("%d — playing #%d", m.songs, sub+1))),
-		widget.NewFormItem("Duration", widget.NewLabel(
-			(time.Duration(m.duration)*time.Millisecond).Round(time.Second).String())),
-		widget.NewFormItem("Output", widget.NewLabel(fmt.Sprintf(
-			"%d Hz, 16-bit stereo, panning %.0f%%", sampleRate, pan))),
+	rows = append(rows,
+		rowKV("Format", m.formatName),
+		rowKV("Format ID", m.formatID),
+		rowKV("DeliPlayer", deliPlayerFor(m.formatID, m.formatName)),
+		rowKV("Decoder", decoderEngine(m.formatName)+" (C++)"),
+		rowKV("Voices", fmt.Sprintf("%d (Paula)", m.voices)),
+		rowKV("Subsongs", fmt.Sprintf("%d — playing #%d", max(m.songs, 1), sub+1)),
+		rowKV("Duration", (time.Duration(m.duration)*time.Millisecond).Round(time.Second).String()),
+		rowKV("Output", fmt.Sprintf("%d Hz, 16-bit stereo, panning %.0f%%", sampleRate, panV)),
 	)
+	rows = append(rows,
+		g.Separator(),
+		g.Custom(func() {
+			bevelButton("ferm", "Fermer", false, func() {
+				imgui.CloseCurrentPopup()
+			})
+		}),
+	)
+	return rows
+}
 
-	dlg := dialog.NewCustom("Module info", "Close",
-		container.NewVBox(widget.NewForm(items...)), w)
-	dlg.Resize(fyne.NewSize(560, 420))
-	dlg.Show()
+// rowKV renders a "label : value" pair with a fixed label column.
+func rowKV(k, v string) g.Widget {
+	return g.Custom(func() {
+		imgui.Text(k)
+		imgui.SameLineV(120, 0)
+		imgui.TextUnformatted(v)
+	})
 }
