@@ -58,6 +58,7 @@ static inline void wb32(uint32_t a,uint32_t v){ if (a>=RAM_SIZE-3)return; emu_ra
 /* ---- paula ---- */
 void  paula_init(void);
 void  paula_write(uint32_t reg, uint16_t v);
+void  paula_write8(uint32_t reg, uint16_t v);
 uint16_t paula_read(uint32_t reg);
 /* render n stereo frames into out (s16 interleaved), advance DMA */
 void  paula_render(int16_t *out, int frames, int rate);
@@ -69,17 +70,24 @@ int   paula_dma_pending(void);   /* any channel DMA-on */
 
 /* ---- cia ---- */
 void   cia_init(void);
+/* tell the CIA model which chip (0=A,1=B) and ICR bit (0=TA,1=TB)
+ * the vector captured by AddICRVector rides on */
+void   cia_set_icr(int chip, int tim);
 void   ciaa_write(uint32_t reg, uint8_t v);
 uint8_t ciaa_read(uint32_t reg);
-/* current timerA rate in ticks/sec (0 = stopped) */
-double cia_timerA_hz(void);
+void   ciab_write(uint32_t reg, uint8_t v);
+uint8_t ciab_read(uint32_t reg);
+/* rate in ticks/sec of the timer the captured vector rides on
+ * (0 = stopped) */
+double cia_tick_hz(void);
 /* level-6 int handler vector captured via SetIntVector-style write */
 extern uint32_t cia_intvec;
+extern uint32_t aud_vec, aud_vec_data;
 extern uint32_t cia_intdata;    /* Interrupt struct passed in a1 */
-/* feed CPU cycles; nonzero when CIA timer A underflows */
+/* feed CPU cycles; nonzero when the vector's timer underflows */
 int     cia_pump(int cpu_cycles);
-/* AddICRVector-style arm: latch + start timer A */
-void    cia_arm_ta(uint16_t latch);
+/* AddICRVector-style arm: latch + start the captured timer */
+void    cia_arm(uint16_t latch);
 
 /* ---- hunk loader ---- */
 /* load hunk file into arena, relocate, return code base or 0 */
@@ -117,6 +125,7 @@ void    emu_build_deliglobals(EmuCtx*);       /* DeliGlobals + trampolines */
 int64_t  emu_call(EmuCtx*, uint32_t faddr, int64_t d0, int64_t d1, int64_t a0, int64_t a1);
 /* one 50Hz (or dtg_Timer) tick step: call DTP_Interrupt or CIA vector */
 void    emu_tick(EmuCtx*);
+void    emu_aud_irq(int ch);          /* raise an audio-channel int4 */
 /* pump until the currently scheduled interrupt fires */
 double  emu_seconds_per_tick(EmuCtx*);
 

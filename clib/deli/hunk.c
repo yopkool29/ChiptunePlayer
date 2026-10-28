@@ -45,10 +45,15 @@ uint32_t hunk_load(const char *path, uint32_t *code_base, uint32_t *code_size)
 	memset(base, 0, sizeof base);
 	*code_base = 0; *code_size = 0;
 
+	/* deferred relocs: RELOC32 blocks sit inside their hunk record,
+	 * parsed before later hunks are allocated — apply after the walk */
+	struct { uint32_t ph, th, ro; } rel[4096];
+	int nrel = 0;
+
 	for (uint32_t i = 0; i < nh && off + 4 <= (uint32_t)fsz; ) {
 		uint32_t tag = be32(d + off); off += 4;
 		if (tag == 0x3F2) { i++; continue; }           /* HUNK_END        */
-		if (tag == 0x3E9 || tag == 0x3E8) {            /* CODE / DATA     */
+		if (tag == 0x3E9 || tag == 0x3EA) {            /* CODE / DATA     */
 			uint32_t ln = be32(d + off) * 4; off += 4;
 			uint32_t a = emu_alloc(sizes[i] ? sizes[i] : ln, 0);
 			if (a == 0) { free(d); return 0; }
@@ -58,23 +63,20 @@ uint32_t hunk_load(const char *path, uint32_t *code_base, uint32_t *code_size)
 			off += ln;
 			continue;
 		}
-		if (tag == 0x3EA) {                            /* BSS             */
+		if (tag == 0x3EB) {                            /* BSS             */
 			base[i] = emu_alloc(sizes[i], 0);
 			off += 4;
 			continue;
 		}
 		if (tag == 0x3EC) {                            /* RELOC32         */
-			uint32_t hh = 0;
 			while (off + 4 <= (uint32_t)fsz) {
 				uint32_t n = be32(d + off); off += 4;
 				if (n == 0) break;
 				uint32_t hnum = be32(d + off); off += 4;
-				uint32_t b = (hnum >= first && hnum <= last) ? base[hnum - first] : 0;
-				(void)hh;
-				for (uint32_t k = 0; k < n && off + 4 <= (uint32_t)fsz; k++) {
+				for (uint32_t k = 0; k < n && off + 4 <= (uint32_t)fsz && nrel < 4096; k++) {
 					uint32_t ro = be32(d + off); off += 4;
-					if (b && base[i])
-						wb32(base[i] + ro, rb32(base[i] + ro) + b);
+					rel[nrel].ph = i; rel[nrel].th = hnum; rel[nrel].ro = ro;
+					nrel++;
 				}
 			}
 			continue;
@@ -85,6 +87,14 @@ uint32_t hunk_load(const char *path, uint32_t *code_base, uint32_t *code_size)
 			continue;
 		}
 		break; /* unknown tag: stop, partial load is still usable */
+	}
+
+	for (int k = 0; k < nrel; k++) {
+		uint32_t ph = rel[k].ph;
+		uint32_t tb = (rel[k].th >= first && rel[k].th <= last)
+			? base[rel[k].th - first] : 0;
+		if (tb && base[ph] && rel[k].ro + 4 <= sizes[ph])
+			wb32(base[ph] + rel[k].ro, rb32(base[ph] + rel[k].ro) + tb);
 	}
 	free(d);
 	return base[0];

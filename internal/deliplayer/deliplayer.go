@@ -28,6 +28,9 @@ void deliplayer_mute(DeliPlayer *, int, int);
 int  deliplayer_voice_vol(DeliPlayer *, int);
 void deliplayer_set_vu_lead_ms(int);
 uint32_t deliplayer_tag(DeliPlayer *, int);
+const uint8_t *deliplayer_ram(DeliPlayer *);
+double deliplayer_tickhz(DeliPlayer *);
+uint32_t deliplayer_code(DeliPlayer *);
 */
 import "C"
 
@@ -215,14 +218,21 @@ func LoadFor(path string, song int) (*Player, error) {
 	return nil, ErrNoPlayer
 }
 
-// probeAudio renders secs of audio and reports whether any non-zero
-// sample was produced.
+// probeAudio renders up to secs of audio and reports whether any
+// non-zero sample was produced. Returns as soon as audio appears —
+// a real module is detected in a few ms, only a silent player burns
+// the whole budget.
 func (pl *Player) probeAudio(secs float64) bool {
-	buf := make([]byte, int(44100*secs)*4)
-	pl.FillBuffer(buf)
-	for _, b := range buf {
-		if b != 0 {
-			return true
+	chunk := make([]byte, 44100/20*4) // ~50 ms per round
+	for t := 0.0; t < secs; t += 0.05 {
+		for i := range chunk {
+			chunk[i] = 0
+		}
+		pl.FillBuffer(chunk)
+		for _, b := range chunk {
+			if b != 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -302,6 +312,20 @@ func (pl *Player) Reinit(song int) error {
 	C.deliplayer_setsong(pl.p, C.int(song))
 	return nil
 }
+// codebase returns the player's hunk-0 load address.
+func (pl *Player) codebase() uint32 { return uint32(C.deliplayer_code(pl.p)) }
+
+// emuRead exposes emulated RAM for tests/debugging (big-endian space).
+func (pl *Player) emuRead(addr, n uint32) []byte {
+	b := make([]byte, n)
+	base := unsafe.Pointer(C.deliplayer_ram(pl.p))
+	copy(b, unsafe.Slice((*byte)(unsafe.Add(base, addr)), n))
+	return b
+}
+
+// tickHz reports the current music-tick rate (test/debug helper).
+func (pl *Player) tickHz() float64 { return float64(C.deliplayer_tickhz(pl.p)) }
+
 func (pl *Player) SetPath(string)                 {}
 func (pl *Player) MixerInit(freq, precision, channels, zero, panning int) {
 }
@@ -322,9 +346,12 @@ func (pl *Player) VoiceVolume(v int) int {
 	return int(C.deliplayer_voice_vol(pl.p, C.int(v&3))) * 100 / 64
 }
 func (pl *Player) MuteVoice(v int, m bool) {
+	if v < 0 || v > 3 {
+		return // 4 Paula channels — no wrap: callers may pass a wider voice index
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	pl.mute[v&3] = m
+	pl.mute[v] = m
 	if pl.p != nil {
 		f := C.int(0)
 		if m {

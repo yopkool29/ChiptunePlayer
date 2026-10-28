@@ -73,7 +73,7 @@ uint32_t emu_rstr(uint32_t addr, char *out, uint32_t max)
 static unsigned rd8(unsigned a){
 	if (a >= REG_BASE && a < REG_END) return paula_read(a - REG_BASE) >> ((a & 1) ? 0 : 8);
 	if (a >= CIAA_BASE && a < CIAA_END) return ciaa_read(a - CIAA_BASE);
-	if (a >= CIAB_BASE && a < CIAB_END) return 0;
+	if (a >= CIAB_BASE && a < CIAB_END) return ciab_read(a - CIAB_BASE);
 	if (a >= KICK_BASE && a < HOST_MMIO) return 0;
 	if (a < RAM_SIZE) return emu_ram[a];
 	return 0;
@@ -81,7 +81,7 @@ static unsigned rd8(unsigned a){
 static unsigned rd16(unsigned a){
 	if (a >= REG_BASE && a < REG_END) return paula_read(a - REG_BASE);
 	if (a >= CIAA_BASE && a < CIAA_END) return ciaa_read(a - CIAA_BASE);
-	if (a >= CIAB_BASE && a < CIAB_END) return 0;
+	if (a >= CIAB_BASE && a < CIAB_END) return ciab_read(a - CIAB_BASE);
 	if (a >= KICK_BASE && a < HOST_MMIO) return 0;
 	if (a + 1 < RAM_SIZE) return rb16(a);
 	return 0;
@@ -94,28 +94,38 @@ static unsigned rd32(unsigned a){
 	if (a + 3 < RAM_SIZE) return rb32(a);
 	return (rd16(a) << 16) | rd16(a + 2);
 }
+static void watch_hit(unsigned a, unsigned v);
 static void wr8(unsigned a, unsigned v){
-	if (a >= REG_BASE && a < REG_END) { paula_write(a - REG_BASE, (uint16_t)v); return; }
+	if (a >= REG_BASE && a < REG_END) { paula_write8(a - REG_BASE, (uint16_t)v); return; }
 	if (a >= CIAA_BASE && a < CIAA_END) { ciaa_write(a - CIAA_BASE, (uint8_t)v); return; }
-	if (a >= CIAB_BASE && a < CIAB_END) return;
+	if (a >= CIAB_BASE && a < CIAB_END) { ciab_write(a - CIAB_BASE, (uint8_t)v); return; }
 	if (a >= HOST_MMIO) { extern void host_mmio_write(unsigned, unsigned); host_mmio_write(a, v); return; }
 	if (a >= KICK_BASE) return;
+	watch_hit(a, v);
 	if (a < RAM_SIZE) emu_ram[a] = v;
 }
 static uint32_t watch_a[8]; static int nwatch = -1;
+static uint32_t watch_lo, watch_hi = (uint32_t)-1;   /* a-b range form */
 static void watch_init(void)
 {
 	char *e = getenv("DELI_WATCH");
 	if (!e) { nwatch = 0; return; }
 	char buf[256]; strncpy(buf, e, sizeof buf - 1); buf[255] = 0;
 	nwatch = 0;
-	for (char *t = strtok(buf, ","); t && nwatch < 8; t = strtok(0, ","))
-		watch_a[nwatch++] = strtoul(t, 0, 16);
+	for (char *t = strtok(buf, ","); t && nwatch < 8; t = strtok(0, ",")) {
+		char *dash = strchr(t, '-');
+		if (dash) { watch_lo = strtoul(t, 0, 16);
+		            watch_hi = strtoul(dash + 1, 0, 16); }
+		else      watch_a[nwatch++] = strtoul(t, 0, 16);
+	}
 }
 static void watch_hit(unsigned a, unsigned v)
 {
 	if (nwatch < 0) watch_init();
 	extern unsigned int m68k_get_reg(void*, int);
+	if (watch_hi != (uint32_t)-1 && a < watch_hi && a + 4 > watch_lo)
+		fprintf(stderr, "[watch] %06x <- %06x pc=%06x\n", a, v,
+		        m68k_get_reg(0, 16));
 	for (int i = 0; i < nwatch; i++)
 		if (a == watch_a[i] || a + 1 == watch_a[i] || a + 2 == watch_a[i] || a + 3 == watch_a[i])
 			fprintf(stderr, "[watch] %06x <- %06x pc=%06x\n", a, v,
@@ -124,7 +134,7 @@ static void watch_hit(unsigned a, unsigned v)
 static void wr16(unsigned a, unsigned v){
 	if (a >= REG_BASE && a < REG_END) { paula_write(a - REG_BASE, (uint16_t)v); return; }
 	if (a >= CIAA_BASE && a < CIAA_END) { ciaa_write(a - CIAA_BASE, (uint8_t)v); return; }
-	if (a >= CIAB_BASE && a < CIAB_END) return;
+	if (a >= CIAB_BASE && a < CIAB_END) { ciab_write(a - CIAB_BASE, (uint8_t)v); return; }
 	if (a >= HOST_MMIO) { extern void host_mmio_write(unsigned, unsigned); host_mmio_write(a, v); return; }
 	if (a >= KICK_BASE) return;
 	watch_hit(a, v);

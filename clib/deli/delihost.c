@@ -621,8 +621,17 @@ static void dispatch(int slot)
 		if (idx == 0) {          /* AddICRVector */
 			cia_intvec = rb32(a1 + 18);
 			cia_intdata = a1;
-			cia_arm_ta(rb16(G->deli_base + 54)); /* latch = dtg_Timer */
-			rr = d0;             /* grant the requested mask */
+			/* d0 = ICR bit (0=TA, 1=TB); a6 = resource base selects
+			 * the chip — players like ArtOfNoise-4V hook CIA-B
+			 * timer B and program its latch themselves */
+			cia_set_icr(m68k_get_reg(0, M68K_REG_A6) == g_lib_ciab,
+			            d0 == 1);
+			cia_arm(rb16(G->deli_base + 54)); /* latch = dtg_Timer */
+			/* AddICRVector returns NULL on success — players test
+			 * d0 and take an error path on nonzero, so returning
+			 * the mask here made e.g. ArtOfNoise-4V skip its own
+			 * latch programming and run at the stale default */
+			rr = 0;
 		} else if (idx == 2) {   /* AbleICR */
 			rr = d0;
 		}
@@ -659,16 +668,23 @@ static void dispatch(int slot)
 		case 13: case 14: case 17: case 18: case 19: r = 0; break; /* waits */
 		case 15: case 16: r = 0; break;              /* AddPort/RemPort */
 		case 20: case 21: case 22: r = 0; break;     /* Dev calls */
-		case 23: { /* SetIntVector: a1=struct Interrupt, is_code@+18 */
+		case 23: { /* SetIntVector: d0=intNumber, a1=struct Interrupt,
+		              is_code@+18. int4 = audio channels (vec 0x70) */
 			uint32_t code = rb32(a1 + 18);
-			cia_intvec = code;
-			cia_intdata = a1;
+			if (d0 == 4) { aud_vec = code; aud_vec_data = rb32(a1 + 14); }
+			else         { cia_intvec = code; cia_intdata = a1; }
 			r = a1; break;
 		}
 		case 24: case 25: case 26: r = 0; break;     /* supervisor */
 		case 27: r = 0; break;                     /* RawDoFmt */
 		case 28: r = 0; break;                     /* FindName */
-		case 29: r = g_lib_ciaa; break;            /* OpenResource */
+		case 29: { /* OpenResource(a1=name): the base we hand out is
+		            * how AddICRVector later knows which chip the
+		            * vector lives on */
+			char nm[32]; emu_rstr(a1, nm, sizeof nm);
+			r = strstr(nm, "ciab") ? g_lib_ciab : g_lib_ciaa;
+			break;
+		}
 		case 30: { /* Cause(a1=Interrupt): dispatch the server like
 		              exec does — is_Code called with a1=is_Data,
 		              a6=execbase; its rts returns to the Cause caller */
@@ -737,8 +753,8 @@ static void dispatch(int slot)
 		G->timer_val = rb16(G->deli_base + 54);
 		/* reprogram the live timer too — on real HW SetTimer
 		 * rewrites the CIA latch; keeping only timer_val left
-		 * the armed rate stale (cia_timerA_hz wins) */
-		cia_arm_ta(G->timer_val);
+		 * the armed rate stale (cia_tick_hz wins) */
+		cia_arm(G->timer_val);
 		r = 0; break;
 	case S_WAITDMA:   r = 0; break;
 	case S_LOCKSCREEN: r = 0; break;
@@ -789,6 +805,7 @@ static void dispatch(int slot)
 #define IRQ_STUB 0x00000800u
 #define IRQ_HD   0x00000820u
 #define IRQ_DT   0x00000824u
+#define IRQ_RTS  0x00000828u
 
 int64_t emu_call(EmuCtx *c, uint32_t faddr, int64_t d0, int64_t d1, int64_t a0, int64_t a1)
 {
@@ -882,7 +899,7 @@ void emu_set_tick(EmuCtx *c, uint32_t fn, int cia_mode)
 
 double emu_seconds_per_tick(EmuCtx *c)
 {
-	double hz = cia_timerA_hz();
+	double hz = cia_tick_hz();
 	if (hz > 0) return 1.0 / hz;
 	if (c->timer_val && c->timer_val != DTG_TIMER_DEFAULT)
 		return c->timer_val / 709379.0;
@@ -913,6 +930,46 @@ void emu_tick(EmuCtx *c)
 			}
 		}
 		return;
+	}
+}
+
+/* emu_aud_irq raises the channel's audio (int4, vector 0x70) handler.
+ * Two conventions: a server captured via SetIntVector(4) is a plain
+ * function (rts) — run it through the register-saving stub like the
+ * CIA path.  A vector the player poked at 0x70 directly is a raw
+ * hardware exception handler that ends with rte, so instead we hand
+ * it a real exception frame: rte pops [SR][PC][format] and lands on
+ * an rts that returns to the CALL_DONE trampoline. */
+void emu_aud_irq(int ch)
+{
+	uint32_t h = aud_vec ? aud_vec : rb32(0x70);
+	if (!h) return;
+	uint32_t sp = 0x00800000;
+	wb32(sp, tramp(CALL_DONE));
+	if (aud_vec) {
+		m68k_set_reg(M68K_REG_A7, sp);
+		wb32(IRQ_HD, h);
+		wb32(IRQ_DT, aud_vec_data);
+		m68k_set_reg(M68K_REG_PC, IRQ_STUB);
+	} else {
+		sp -= 8;
+		wb16(sp + 0, 0x2000);        /* SR: supervisor */
+		wb32(sp + 2, IRQ_RTS);       /* PC: rte lands here */
+		wb16(sp + 6, 0);             /* frame format 0 (68020 rte) */
+		m68k_set_reg(M68K_REG_A7, sp);
+		m68k_set_reg(M68K_REG_A1, 0);
+		m68k_set_reg(M68K_REG_A6, rb32(4));
+		m68k_set_reg(M68K_REG_PC, h);
+	}
+	long budget = 2000000;
+	while (budget > 0) {
+		budget -= m68k_execute(20000);
+		if (G->pending_call >= 0) {
+			int slot = G->pending_call;
+			G->pending_call = -1;
+			if (slot == CALL_DONE) break;
+			dispatch(slot);
+		}
 	}
 }
 
@@ -966,6 +1023,7 @@ EmuCtx *emu_create(void)
 	wb16(0x814, 0x4e90);
 	wb16(0x816, 0x4cdf); wb16(0x818, 0x7fff);
 	wb16(0x81a, 0x4e75);
+	wb16(IRQ_RTS, 0x4e75);           /* lone rts: raw rte handlers land here */
 	m68k_init();
 	/* 68020: players tagged *020 (AHX et al.) use 020+ ISA extensions
 	 * (tst.l An, long bra, extb.l ...) — a strict 68000 would take

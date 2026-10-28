@@ -147,6 +147,12 @@ void deliplayer_close(DeliPlayer *p)
 
 /* ---- meta helpers ---- */
 uint32_t deliplayer_tag(DeliPlayer *p, int tag) { return p->tags[tag]; }
+const uint8_t *deliplayer_ram(DeliPlayer *p) { (void)p; return emu_ram; }
+double deliplayer_tickhz(DeliPlayer *p)
+{
+	return p && p->ctx ? 1.0 / emu_seconds_per_tick(p->ctx) : 0;
+}
+uint32_t deliplayer_code(DeliPlayer *p) { return p->code; }
 int deliplayer_subsongs(DeliPlayer *p, int *lo, int *hi)
 {
 	if (p->tags[T_NEWSUBSONGRANGE]) {

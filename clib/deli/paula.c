@@ -38,10 +38,14 @@ typedef struct {
 	int      half;     /* 0 = need new word, 1 = low byte pending   */
 	double   frac;     /* clocks elapsed in current byte            */
 	uint8_t  muted;
+	uint8_t  end_irq;  /* audio-DMA-end irq already raised for len==0 */
 } PChan;
 
 static PChan ch[4];
-static uint16_t dmacon, intena, adkcon;
+static uint16_t dmacon, intena, intreq, adkcon;
+static int ptrace = -1;
+#define PTRACE(...) do { if (ptrace < 0) ptrace = getenv("PAULA_TRACE") != 0; \
+	if (ptrace) fprintf(stderr, __VA_ARGS__); } while (0)
 static int      led_filter;
 long paula_fetch_calls, paula_fetch_nz;   /* debug counters */
 
@@ -79,12 +83,17 @@ void paula_init(void)
 	lvl_next_snap = 0;
 	audio_ns = 0;
 	dmacon = 0x200;   /* host owns the master audio-DMA bit, like DeliTracker */
-	intena = adkcon = 0;
+	intena = intreq = adkcon = 0;
 	led_filter = 0;
 }
 
 void paula_set_led(int on) { led_filter = on; }
-void paula_mute(int c, int on) { if (c >= 0 && c < 4) ch[c].muted = on; }
+void paula_mute(int c, int on) {
+	if (c >= 0 && c < 4) {
+		PTRACE("[paula] t=%.3f mute ch%d=%d\n", emu_time_ns / 1e9, c, on);
+		ch[c].muted = on;
+	}
+}
 int  paula_chan_vol(int c) { return (c >= 0 && c < 4) ? ch[c].vol : 0; }
 /* VU level at the audible position, 0..64 scale.  The AUDxVOL
  * register alone lies — synth players (AHX) only write it on
@@ -129,6 +138,48 @@ static void chan_write(int c, uint32_t off, uint16_t v)
 	}
 }
 
+/* Byte write: real custom regs are 16-bit, so a byte store hits one
+ * lane — odd address = low byte, even = high byte.  The common idiom
+ * is `move.b d0,AUDxVOL+1`; without this the volume write lands in
+ * the void and the channel plays at vol 0 (ArtOfNoise-4V). */
+void paula_write8(uint32_t reg, uint16_t v)
+{
+	if (reg >= AUD_OFF(0) && reg < AUD_OFF(0) + 0x40) {
+		int c = (reg - AUD_OFF(0)) / 0x10;
+		PChan *p = &ch[c];
+		int on = (dmacon & (1 << c)) != 0;
+		switch (reg & 0x0F) {
+		case 0x00: p->loop = (p->loop & 0x00FFFFFF) | ((uint32_t)(v & 0xFF) << 24); goto lc;
+		case 0x01: p->loop = (p->loop & 0xFF00FFFF) | ((uint32_t)(v & 0xFF) << 16); goto lc;
+		case 0x02: p->loop = (p->loop & 0xFFFF00FF) | ((uint32_t)(v & 0xFF) << 8);  goto lc;
+		case 0x03: p->loop = (p->loop & 0xFFFFFF00) |  (uint32_t)(v & 0xFF);        goto lc;
+		case 0x04: p->llen = (uint16_t)(((v & 0xFF) << 8) | (p->llen & 0xFF)); goto ln;
+		case 0x05: p->llen = (uint16_t)((p->llen & 0xFF00) | (v & 0xFF));      goto ln;
+		case 0x06: p->per = (uint16_t)(((v & 0xFF) << 8) | (p->per & 0xFF)); break;
+		case 0x07: p->per = (uint16_t)((p->per & 0xFF00) | (v & 0xFF));        break;
+		case 0x08: p->vol = (uint16_t)(((v & 0xFF) << 8) | (p->vol & 0xFF)); break;
+		case 0x09: p->vol = (uint16_t)((p->vol & 0xFF00) | (v & 0xFF));        break;
+		case 0x0A: p->dat = (uint16_t)(((v & 0xFF) << 8) | (p->dat & 0xFF)); p->use_dat = 1; break;
+		case 0x0B: p->dat = (uint16_t)((p->dat & 0xFF00) | (v & 0xFF));        p->use_dat = 1; break;
+		}
+		return;
+	lc:	if (!on) p->ptr = p->loop;
+		return;
+	ln:	if (!on) p->len = p->llen;
+		return;
+	}
+	uint16_t *w = 0;   /* global regs: merge into the 16-bit shadow */
+	switch (reg & ~1u) {
+	case R_DMACON: w = &dmacon; break;
+	case R_INTENA: w = &intena; break;
+	case R_INTREQ: w = &intreq; break;
+	case R_ADKCON: w = &adkcon; break;
+	}
+	if (!w) return;
+	if (reg & 1) *w = (uint16_t)((*w & 0xFF00) | (v & 0xFF));
+	else         *w = (uint16_t)((*w & 0x00FF) | ((v & 0xFF) << 8));
+}
+
 extern unsigned int m68k_get_reg(void*, int);
 void paula_write(uint32_t reg, uint16_t v)
 {
@@ -146,11 +197,19 @@ void paula_write(uint32_t reg, uint16_t v)
 		uint16_t old = dmacon;
 		if (v & 0x8000) dmacon |= v & 0x7FFF;
 		else            dmacon &= ~v & 0x7FFF;
-		/* rising edge on a channel bit: channel restarts — first word
-		 * is the latched AUDxDAT if one was written (real HW) */
+		/* rising edge on a channel bit: DMA-on latches AUDxLC/LEN and
+		 * restarts the fetch — a channel re-enabled mid-sample must
+		 * resume from the reload pointer, not its stale position */
 		uint16_t rising = dmacon & ~old & 0xF;
+		PTRACE("[paula] t=%.3f DMACON %04x->%04x rise=%x\n",
+		       emu_time_ns / 1e9, old, dmacon, rising);
 		for (int c = 0; c < 4; c++)
-			if (rising & (1 << c)) { ch[c].half = 0; ch[c].frac = 0; ch[c].have_w = 0; }
+			if (rising & (1 << c)) {
+				ch[c].half = 0; ch[c].frac = 0; ch[c].have_w = 0;
+				ch[c].ptr = ch[c].loop; ch[c].len = ch[c].llen;
+				PTRACE("[paula]   ch%d start ptr=%06x len=%x vol=%d per=%d\n",
+				       c, ch[c].ptr, ch[c].len, ch[c].vol, ch[c].per);
+			}
 		break;
 	}
 	case R_INTENA:
@@ -161,7 +220,10 @@ void paula_write(uint32_t reg, uint16_t v)
 		if (v & 0x8000) adkcon |= v & 0x7FFF;
 		else            adkcon &= ~v & 0x7FFF;
 		break;
-	case R_INTREQ: break; /* ignore request writes */
+	case R_INTREQ: /* bit15=set/clr — handlers ack their channel bit */
+		if (v & 0x8000) intreq |= v & 0x7FFF;
+		else            intreq &= ~v & 0x7FFF;
+		break;
 	}
 }
 
@@ -184,7 +246,7 @@ uint16_t paula_read(uint32_t reg)
 	case R_DMACONR: return dmacon | 0x200;
 	case R_INTENAR: return intena | 0x4000;
 	case R_ADKCONR: return adkcon;
-	case R_INTREQR: return 0;
+	case R_INTREQR: return intreq;
 	}
 	if (reg >= AUD_OFF(0) && reg < AUD_OFF(0) + 0x40) {
 		int c = (reg - AUD_OFF(0)) / 0x10;
@@ -216,10 +278,28 @@ static int8_t next_byte(PChan *p)
 		p->w = p->dat; p->use_dat = 0;
 	} else {
 		if (p->len == 0) {
-			if (!p->llen) return 0;
-			p->ptr = p->loop; p->len = p->llen;
+			/* DMA end: real HW raises the channel audio interrupt —
+			 * streaming players (ArtOfNoise-8V …) feed the next
+			 * chunk in the int4 handler (vector 0x70).  Level-
+			 * triggered would re-fire forever on a dead channel,
+			 * so edge-trigger: once per drained segment. */
+			int c = (int)(p - ch);
+			if (!p->end_irq && (intena & 0x4000) &&
+			    (intena & (0x80 << c))) {
+				p->end_irq = 1;
+				intreq |= 0x80 << c; /* handler reads INTREQR for ch */
+				emu_aud_irq(c);
+			}
+			if (p->len == 0) {
+				if (!p->llen) { p->have_w = 0; return 0; }
+				PTRACE("[paula] t=%.3f ch%d drain ptr=%06x -> loop %06x len %x (w=%04x)\n",
+				       emu_time_ns / 1e9, (int)(p - ch), p->ptr,
+				       p->loop, p->llen, p->w);
+				p->ptr = p->loop; p->len = p->llen;
+			}
+			if (p->len) p->end_irq = 0;
 		}
-		if (p->ptr == 0) return 0;
+		if (p->ptr == 0) { p->have_w = 0; return 0; }
 		p->w = rb16(p->ptr);
 		paula_fetch_calls++; if (p->w) paula_fetch_nz++;
 		p->ptr += 2;
