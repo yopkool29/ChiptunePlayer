@@ -26,6 +26,7 @@ import (
 	g "github.com/AllenDang/giu"
 	"github.com/ebitengine/oto/v3"
 
+	"amiga-player/internal/bundled"
 	"amiga-player/internal/decoder"
 	"amiga-player/internal/deliplayer"
 	"amiga-player/internal/render"
@@ -1330,6 +1331,27 @@ func loop() {
 	)
 }
 
+// installRuntime extracts the embedded 68k players + Amiga DOS files
+// to a cache dir so the binary works installed, without the source
+// tree. Existing disk dirs (source tree, DELI_DOSROOT) keep priority.
+func installRuntime() {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return
+	}
+	rt := filepath.Join(cache, "chiptuneplayer")
+	if err := bundled.Install(rt); err != nil {
+		return
+	}
+	deliplayer.PlayerDirs = append([]string{
+		filepath.Join(rt, "players"),
+		filepath.Join(rt, "players-uade"),
+	}, deliplayer.PlayerDirs...)
+	if os.Getenv("DELI_DOSROOT") == "" {
+		os.Setenv("DELI_DOSROOT", filepath.Join(rt, "amiga-dos"))
+	}
+}
+
 func main() {
 	ctx, ready, err := oto.NewContext(&oto.NewContextOptions{
 		SampleRate:   sampleRate,
@@ -1345,6 +1367,8 @@ func main() {
 	otoCtx = ctx
 
 	loadConfig()
+
+	installRuntime()
 
 	if d, err := png.Decode(bytes.NewReader(logoPNG)); err == nil {
 		logoImg = d

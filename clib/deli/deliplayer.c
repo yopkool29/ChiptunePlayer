@@ -88,7 +88,8 @@ static int load_module(EmuCtx *c, const char *path)
 	snprintf(base, sizeof base, "%s", sl ? sl + 1 : path);
 	emu_wstr(rb32(c->deli_base + 24), dir);
 	emu_wstr(rb32(c->deli_base + 28), base);
-	emu_ram[rb32(c->deli_base + 32)] = 0;
+	uint32_t flagp = rb32(c->deli_base + 32);
+	if (flagp < RAM_SIZE) emu_ram[flagp] = 0;
 	return 0;
 }
 

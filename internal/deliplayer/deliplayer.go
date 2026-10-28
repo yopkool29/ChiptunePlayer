@@ -48,6 +48,8 @@ var (
 
 // PlayerDirs is searched for 68k player binaries, in order.
 var PlayerDirs = []string{
+	"internal/bundled/players",
+	"internal/bundled/players-uade",
 	"uade/players",
 	"extracted/players",
 	"extracted/players/DeliPlayers/PlayerStore",
@@ -122,15 +124,17 @@ func sniffPlayer(path string) bool {
 }
 
 // allPlayers returns every regular file under the player dirs.
+// Dedup is by basename: the same player may be present both in the
+// bundled cache and in a source-tree dir.
 func allPlayers() []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, d := range PlayerDirs {
 		filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
-			if err != nil || de.IsDir() || seen[p] {
+			if err != nil || de.IsDir() || seen[de.Name()] {
 				return nil
 			}
-			seen[p] = true
+			seen[de.Name()] = true
 			out = append(out, p)
 			return nil
 		})
@@ -173,9 +177,13 @@ func LoadFor(path string, song int) (*Player, error) {
 		cands = append(cands, n)
 	}
 	cands = append(cands, allPlayers()...)
+	trace := os.Getenv("DELI_PROBE_TRACE") != ""
 	for _, c := range cands {
 		if !sniffPlayer(c) {
 			continue
+		}
+		if trace {
+			fmt.Fprintf(os.Stderr, "[probe] %s\n", c)
 		}
 		pl, err := Open(c)
 		if err != nil {

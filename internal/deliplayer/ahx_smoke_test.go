@@ -1,14 +1,12 @@
 package deliplayer
 
 import (
-	"os"
 	"testing"
 )
 
 func TestAHXSmoke(t *testing.T) {
-	PlayerDirs = []string{"../../extracted/players"}
-	os.Setenv("DELI_DOSROOT", "../../amiga-dos")
-	p, err := LoadFor("../../testdata/AHX/N00b/carni larvae.ahx", 0)
+	testChdirRoot()
+	p, err := LoadFor("testdata/AHX/N00b/carni larvae.ahx", 0)
 	if err != nil {
 		t.Skipf("player/module not available: %v", err)
 	}

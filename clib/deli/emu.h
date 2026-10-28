@@ -50,10 +50,10 @@ void     emu_read(uint32_t addr, void *buf, uint32_t len);
 void     emu_wstr(uint32_t addr, const char *s);
 uint32_t emu_rstr(uint32_t addr, char *out, uint32_t max);
 
-static inline uint16_t rb16(uint32_t a){ if (a+1>=RAM_SIZE)return 0; return (uint16_t)((emu_ram[a]<<8)|emu_ram[a+1]); }
-static inline uint32_t rb32(uint32_t a){ if (a+3>=RAM_SIZE)return 0; return ((uint32_t)emu_ram[a]<<24)|((uint32_t)emu_ram[a+1]<<16)|((uint32_t)emu_ram[a+2]<<8)|emu_ram[a+3]; }
-static inline void wb16(uint32_t a,uint16_t v){ if (a+1>=RAM_SIZE)return; emu_ram[a]=v>>8; emu_ram[a+1]=v; }
-static inline void wb32(uint32_t a,uint32_t v){ if (a+3>=RAM_SIZE)return; emu_ram[a]=v>>24; emu_ram[a+1]=v>>16; emu_ram[a+2]=v>>8; emu_ram[a+3]=v; }
+static inline uint16_t rb16(uint32_t a){ if (a>=RAM_SIZE-1)return 0; return (uint16_t)((emu_ram[a]<<8)|emu_ram[a+1]); }
+static inline uint32_t rb32(uint32_t a){ if (a>=RAM_SIZE-3)return 0; return ((uint32_t)emu_ram[a]<<24)|((uint32_t)emu_ram[a+1]<<16)|((uint32_t)emu_ram[a+2]<<8)|emu_ram[a+3]; }
+static inline void wb16(uint32_t a,uint16_t v){ if (a>=RAM_SIZE-1)return; emu_ram[a]=v>>8; emu_ram[a+1]=v; }
+static inline void wb32(uint32_t a,uint32_t v){ if (a>=RAM_SIZE-3)return; emu_ram[a]=v>>24; emu_ram[a+1]=v>>16; emu_ram[a+2]=v>>8; emu_ram[a+3]=v; }
 
 /* ---- paula ---- */
 void  paula_init(void);

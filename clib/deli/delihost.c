@@ -10,8 +10,12 @@
 #include "emu.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include "../musashi/m68k.h"
 
@@ -88,8 +92,14 @@ void your_instruction_hook_function(unsigned int pc)
 			m68k_get_reg(0, M68K_REG_SR));
 		fprintf(stderr, "[hook] bytes@%x: %02x%02x %02x%02x %02x%02x %02x%02x\n",
 			prev,
-			emu_ram[prev], emu_ram[prev+1], emu_ram[prev+2], emu_ram[prev+3],
-			emu_ram[prev+4], emu_ram[prev+5], emu_ram[prev+6], emu_ram[prev+7]);
+			prev < RAM_SIZE ? emu_ram[prev] : 0,
+			prev + 1 < RAM_SIZE ? emu_ram[prev + 1] : 0,
+			prev + 2 < RAM_SIZE ? emu_ram[prev + 2] : 0,
+			prev + 3 < RAM_SIZE ? emu_ram[prev + 3] : 0,
+			prev + 4 < RAM_SIZE ? emu_ram[prev + 4] : 0,
+			prev + 5 < RAM_SIZE ? emu_ram[prev + 5] : 0,
+			prev + 6 < RAM_SIZE ? emu_ram[prev + 6] : 0,
+			prev + 7 < RAM_SIZE ? emu_ram[prev + 7] : 0);
 	}
 	prev = pc;
 	if (pc == pc_ring[(pc_ring_i + PC_RING - 1) & (PC_RING - 1)])
@@ -357,6 +367,59 @@ static void dos_translate(const char *ap, char *out, int sz)
 	}
 }
 
+/* Amiga dos.library is case-insensitive; the host fs is not. Resolve
+ * each path component by scanning its parent directory. Returns 0 and
+ * writes the resolved path to out, or -1 if a component is missing. */
+static int ci_resolve(const char *in, char *out, int sz)
+{
+	char cur[1024] = "";
+	const char *p = in;
+	if (*p == '/') { strcpy(cur, "/"); p++; }
+	while (*p) {
+		const char *e = strchr(p, '/');
+		int n = e ? (int)(e - p) : (int)strlen(p);
+		if (n > 255) n = 255;
+		char comp[256];
+		memcpy(comp, p, n); comp[n] = 0;
+		p = e ? e + 1 : p + n;
+		if (!n) continue;
+
+		char cand[1280];
+		snprintf(cand, sizeof cand, "%s%s%s", cur,
+		         (cur[0] && cur[strlen(cur)-1] != '/') ? "/" : "", comp);
+		if (access(cand, F_OK) == 0) {
+			snprintf(cur, sizeof cur, "%s", cand);
+			continue;
+		}
+		DIR *dd = opendir(cur[0] ? cur : ".");
+		if (!dd) return -1;
+		struct dirent *de;
+		const char *hit = NULL;
+		while ((de = readdir(dd)))
+			if (!strcasecmp(de->d_name, comp)) { hit = de->d_name; break; }
+		if (!hit) { closedir(dd); return -1; }
+		snprintf(cur, sizeof cur, "%s%s%s", cur,
+		         (cur[0] && cur[strlen(cur)-1] != '/') ? "/" : "", hit);
+		closedir(dd);
+	}
+	snprintf(out, sz, "%s", cur);
+	return 0;
+}
+
+/* dos_path translates ap and, when the literal path does not exist,
+ * retries component-wise case-insensitively (e.g. a player opening
+ * "ENV:eagleplayer/ahx.waves" finds env/EaglePlayer/ahx.waves). */
+static void dos_path(const char *ap, char *out, int sz)
+{
+	dos_translate(ap, out, sz);
+	struct stat st;
+	if (stat(out, &st) != 0) {
+		char rp[1024];
+		if (ci_resolve(out, rp, sizeof rp) == 0)
+			snprintf(out, sz, "%s", rp);
+	}
+}
+
 static int      bptr_idx(uint32_t b) { return (int)(b >> 2) - 1; }
 static uint32_t idx_bptr(int i)      { return (uint32_t)(i + 1) << 2; }
 
@@ -404,12 +467,13 @@ static uint32_t dos_dispatch(int idx, uint32_t d1, uint32_t d2, uint32_t d3, uin
 	case -30: { /* Open(name=d1, mode=d2) */
 		char nm[512], hp[600];
 		emu_rstr(d1, nm, sizeof nm);
-		dos_translate(nm, hp, sizeof hp);
+		dos_path(nm, hp, sizeof hp);
 		const char *m = (d2 == 1006) ? "wb" : (d2 == 1004 ? "r+b" : "rb");
 		FILE *f = fopen(hp, m);
 		if (!f && d2 == 1004) f = fopen(hp, "rb");
 		if (getenv("DELI_TRACE"))
-			fprintf(stderr, "[dos ] Open(\"%s\" -> \"%s\") = %p\n", nm, hp, (void *)f);
+			fprintf(stderr, "[dos ] Open(\"%s\" -> \"%s\") = %p%s%d\n", nm, hp, (void *)f,
+			        f ? "" : " errno=", f ? 0 : errno);
 		if (!f) { dos_ioerr = 205; return 0; }
 		for (int i = 0; i < DOS_NFH; i++)
 			if (!dos_fhs[i]) { dos_fhs[i] = f; dos_ioerr = 0; return idx_bptr(i); }
@@ -423,14 +487,14 @@ static uint32_t dos_dispatch(int idx, uint32_t d1, uint32_t d2, uint32_t d3, uin
 	case -42: { /* Read(fh=d1, buf=d2, len=d3) */
 		int i = bptr_idx(d1);
 		if (i < 0 || i >= DOS_NFH || !dos_fhs[i] || d2 >= RAM_SIZE) { dos_ioerr = 206; return (uint32_t)-1; }
-		if (d2 + d3 > RAM_SIZE) d3 = RAM_SIZE - d2;
+		if (d3 > RAM_SIZE - d2) d3 = RAM_SIZE - d2;
 		size_t n = fread(emu_ram + d2, 1, d3, dos_fhs[i]);
 		dos_ioerr = 0; return (uint32_t)n;
 	}
 	case -48: { /* Write(fh=d1, buf=d2, len=d3) */
 		int i = bptr_idx(d1);
 		if (i >= 0 && i < DOS_NFH && dos_fhs[i] && d2 < RAM_SIZE) {
-			if (d2 + d3 > RAM_SIZE) d3 = RAM_SIZE - d2;
+			if (d3 > RAM_SIZE - d2) d3 = RAM_SIZE - d2;
 			fwrite(emu_ram + d2, 1, d3, dos_fhs[i]);
 		}
 		return d3;
@@ -455,7 +519,7 @@ static uint32_t dos_dispatch(int idx, uint32_t d1, uint32_t d2, uint32_t d3, uin
 	case -84: { /* Lock(name=d1, mode=d2) */
 		char nm[512], hp[600];
 		emu_rstr(d1, nm, sizeof nm);
-		dos_translate(nm, hp, sizeof hp);
+		dos_path(nm, hp, sizeof hp);
 		struct stat st;
 		if (getenv("DELI_TRACE"))
 			fprintf(stderr, "[dos ] Lock(\"%s\" -> \"%s\")\n", nm, hp);
@@ -480,7 +544,7 @@ static uint32_t dos_dispatch(int idx, uint32_t d1, uint32_t d2, uint32_t d3, uin
 		int i = bptr_idx(d1);
 		if (i < 0 || i >= DOS_NFH || !dos_locks[i] || d2 + 260 > RAM_SIZE) { dos_ioerr = 206; return 0; }
 		char hp[600];
-		dos_translate(dos_locks[i], hp, sizeof hp);
+		dos_path(dos_locks[i], hp, sizeof hp);
 		struct stat st;
 		int ok = stat(hp, &st) == 0;
 		fib_fill(d2, dos_locks[i], ok ? (long)st.st_size : 0, ok && S_ISDIR(st.st_mode));
@@ -585,8 +649,8 @@ static void dispatch(int slot)
 		}
 		case 5: r = 0; break;                        /* CloseLibrary */
 		case 6: case 7: {                            /* CopyMem(Quick) */
-			if (a0 < RAM_SIZE && a1 < RAM_SIZE && d0 < RAM_SIZE &&
-			    a0 + d0 <= RAM_SIZE && a1 + d0 <= RAM_SIZE)
+			if (a0 < RAM_SIZE && a1 < RAM_SIZE && d0 <= RAM_SIZE &&
+			    d0 <= RAM_SIZE - a0 && d0 <= RAM_SIZE - a1)
 				memmove(emu_ram + a1, emu_ram + a0, d0);
 			r = a1; break;
 		}
