@@ -10,14 +10,16 @@ import (
 	"path/filepath"
 )
 
-//go:embed players players-uade amiga-dos
+//go:embed players players-uade amiga-dos genies uade
 var data embed.FS
 
 // Install extracts the bundled files into dir (typically a user
 // cache dir) and returns it. Files already present with a matching
-// size are skipped, so repeat calls stay cheap.
+// size are skipped, so repeat calls stay cheap. The UADE runtime is
+// made runnable in place: uadecore gets the exec bit and uade/players
+// links to the extracted players-uade dir.
 func Install(dir string) error {
-	return fs.WalkDir(data, ".", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(data, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -36,4 +38,13 @@ func Install(dir string) error {
 		}
 		return os.WriteFile(dst, buf, 0o644)
 	})
+	if err != nil {
+		return err
+	}
+	os.Chmod(filepath.Join(dir, "uade/uadecore"), 0o755)
+	lp := filepath.Join(dir, "uade/players")
+	if _, e := os.Stat(lp); e != nil {
+		os.Symlink("../players-uade", lp)
+	}
+	return nil
 }

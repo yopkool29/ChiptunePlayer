@@ -16,6 +16,7 @@ package deliplayer
 
 typedef struct DeliPlayer DeliPlayer;
 DeliPlayer *deliplayer_open(const char *);
+int  deliplayer_genie(DeliPlayer *, const char *);
 int  deliplayer_load(DeliPlayer *, const char *);
 void deliplayer_render(DeliPlayer *, int16_t *, int, int);
 int  deliplayer_songend(DeliPlayer *);
@@ -35,6 +36,7 @@ uint32_t deliplayer_code(DeliPlayer *);
 import "C"
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -57,6 +59,24 @@ var PlayerDirs = []string{
 	"extracted/players",
 	"extracted/players/DeliPlayers/PlayerStore",
 	"extracted/players/DeliPlayers",
+}
+
+// GenieDirs is searched for NotePlayer genie binaries (the 68k
+// virtual-audio-device plugins noteplayer-style players call into).
+var GenieDirs = []string{
+	"internal/bundled/genies",
+	"x_genies/DeliGenies/GenieStore",
+	"x_genies/DeliGenies",
+}
+
+// noteGenies lists the NotePlayer genies tried for noteplayer-style
+// players (T_NOTESTRUCT present), best first.
+var noteGenies = []string{
+	"14Bit-NotePlayer",
+	"8Voc-NotePlayer",
+	"32Voc-NotePlayerPlus",
+	"Headphone-NotePlayer",
+	"4Voc-NotePlayer",
 }
 
 // extPlayer maps a file extension to a preferred player binary name.
@@ -170,14 +190,107 @@ func Open(playerBin string) (*Player, error) {
 // ErrNoPlayer is returned when no player binary accepts the module.
 var ErrNoPlayer = errors.New("no player accepted this file")
 
+// findGenie resolves a NotePlayer genie binary by basename.
+func findGenie(name string) string {
+	if filepath.IsAbs(name) || strings.ContainsRune(name, '/') {
+		if _, err := os.Stat(name); err == nil {
+			return name
+		}
+		return ""
+	}
+	for _, d := range GenieDirs {
+		var hit string
+		filepath.WalkDir(d, func(p string, de os.DirEntry, err error) error {
+			if err == nil && !de.IsDir() && de.Name() == name {
+				hit = p
+			}
+			if hit != "" {
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if hit != "" {
+			return hit
+		}
+	}
+	return ""
+}
+
+// attachGenie loads a NotePlayer genie into the player's emulated
+// machine. Called before Load so the genie's InitSound/StartInt run in
+// the load sequence.
+func (pl *Player) attachGenie() error {
+	for _, name := range noteGenies {
+		full := findGenie(name)
+		if full == "" {
+			continue
+		}
+		cg := C.CString(full)
+		r := C.deliplayer_genie(pl.p, cg)
+		C.free(unsafe.Pointer(cg))
+		if r == 0 {
+			return nil
+		}
+	}
+	return errors.New("no NotePlayer genie could be attached")
+}
+
+// learnedPlayer remembers the player that accepted a given extension —
+// the brute-force scan only runs once per ext; later files of the same
+// format go straight to the winning binary. Persisted in the cache dir
+// so a restart keeps the mapping.
+var (
+	learnedPlayer = map[string]string{}
+	learnedMu     sync.Mutex
+	learnedOnce   sync.Once
+)
+
+func learnedFile() string {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "chiptuneplayer", "learned.json")
+}
+
+func loadLearned() {
+	learnedOnce.Do(func() {
+		if f := learnedFile(); f != "" {
+			if b, err := os.ReadFile(f); err == nil {
+				learnedMu.Lock()
+				json.Unmarshal(b, &learnedPlayer)
+				learnedMu.Unlock()
+			}
+		}
+	})
+}
+
+func saveLearned() {
+	learnedMu.Lock()
+	defer learnedMu.Unlock()
+	if f := learnedFile(); f != "" {
+		if b, err := json.Marshal(learnedPlayer); err == nil {
+			os.WriteFile(f, b, 0o644)
+		}
+	}
+}
+
 // LoadFor probes candidates for path and returns a ready player or nil.
 // Tries the extension-preferred binary first, then every file in the
 // player dirs (each player's Check2 acts as the format detector).
 func LoadFor(path string, song int) (*Player, error) {
 	ext := strings.ToLower(filepath.Ext(path))
+	seen := map[string]bool{}
+	loadLearned()
+	learnedMu.Lock()
+	lp := learnedPlayer[ext]
+	learnedMu.Unlock()
 	var cands []string
-	if n, ok := extPlayer[ext]; ok {
-		cands = append(cands, n)
+	for _, n := range []string{extPlayer[ext], lp} {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			cands = append(cands, n)
+		}
 	}
 	cands = append(cands, allPlayers()...)
 	trace := os.Getenv("DELI_PROBE_TRACE") != ""
@@ -191,6 +304,16 @@ func LoadFor(path string, song int) (*Player, error) {
 		pl, err := Open(c)
 		if err != nil {
 			continue
+		}
+		// noteplayer-style players (FastTracker2/XM, ImpulseTracker…)
+		// only decode notes: they call dtg_NotePlayer for a NotePlayer
+		// genie to emit audio. Attach a genie before Load.
+		if C.deliplayer_tag(pl.p, 38 /*T_NOTESTRUCT*/) != 0 {
+			if err := pl.attachGenie(); err != nil {
+				if trace {
+					fmt.Fprintf(os.Stderr, "[probe] %s genie: %v\n", c, err)
+				}
+			}
 		}
 		if err := pl.Load(path, song); err != nil {
 			pl.Close()
@@ -213,6 +336,10 @@ func LoadFor(path string, song int) (*Player, error) {
 			pl.Close()
 			continue
 		}
+		learnedMu.Lock()
+		learnedPlayer[ext] = c
+		learnedMu.Unlock()
+		saveLearned()
 		return pl, nil
 	}
 	return nil, ErrNoPlayer
@@ -314,6 +441,9 @@ func (pl *Player) Reinit(song int) error {
 }
 // codebase returns the player's hunk-0 load address.
 func (pl *Player) codebase() uint32 { return uint32(C.deliplayer_code(pl.p)) }
+
+// tag reads a parsed DeliPlayer tag (see DTP_* / T_* tags).
+func (pl *Player) tag(n int) uint32 { return uint32(C.deliplayer_tag(pl.p, C.int(n))) }
 
 // emuRead exposes emulated RAM for tests/debugging (big-endian space).
 func (pl *Player) emuRead(addr, n uint32) []byte {

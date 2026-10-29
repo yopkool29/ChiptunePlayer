@@ -29,7 +29,10 @@ uint32_t emu_alloc(uint32_t size, uint32_t chip_only)
 {
 	(void)chip_only; /* whole arena is chip-reachable in our model */
 	uint32_t a = (bump + 3) & ~3u;
-	if (a + size > RAM_SIZE - 0x10000) return 0;
+	/* size may come straight from emulated code (d0): compare in 64 bits
+	 * so a huge size can't wrap a+size below the limit */
+	if (size > RAM_SIZE - 0x10000 || (uint64_t)a + size > RAM_SIZE - 0x10000)
+		return 0;
 	bump = a + size;
 	memset(emu_ram + a, 0, size);
 	if (nallocs < 1024) allocs[nallocs++] = a;
@@ -102,6 +105,7 @@ static void wr8(unsigned a, unsigned v){
 	if (a >= HOST_MMIO) { extern void host_mmio_write(unsigned, unsigned); host_mmio_write(a, v); return; }
 	if (a >= KICK_BASE) return;
 	watch_hit(a, v);
+	gdb_check_write(a, 1);
 	if (a < RAM_SIZE) emu_ram[a] = v;
 }
 static uint32_t watch_a[8]; static int nwatch = -1;
@@ -138,6 +142,7 @@ static void wr16(unsigned a, unsigned v){
 	if (a >= HOST_MMIO) { extern void host_mmio_write(unsigned, unsigned); host_mmio_write(a, v); return; }
 	if (a >= KICK_BASE) return;
 	watch_hit(a, v);
+	gdb_check_write(a, 2);
 	wb16(a, (uint16_t)v);
 }
 static void wr32(unsigned a, unsigned v){
@@ -150,6 +155,7 @@ static void wr32(unsigned a, unsigned v){
 	if (a >= HOST_MMIO) { extern void host_mmio_write(unsigned, unsigned); host_mmio_write(a, v); return; }
 	if (a >= KICK_BASE) return;
 	watch_hit(a, v);
+	gdb_check_write(a, 4);
 	wb32(a, v);
 }
 

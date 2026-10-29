@@ -4,17 +4,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// appConfig is persisted in ~/.config/chiptuneplayer/config.json.
-// Older locations (config.json next to the exe or in the working
-// directory) are still read when the XDG file does not exist yet.
+// appConfig is persisted in ~/.config/chiptuneplayer/config.json —
+// the only location read or written.
 // debug=true skips interactive confirmations (quit dialog).
 type appConfig struct {
 	Debug      bool   `json:"debug"`
 	ExportPath string `json:"export_path"`
 	VuSyncMs   int    `json:"vu_sync_ms"` // VU latency calibration past oto's ring
 	MusicDir   string `json:"music_dir"`
+	LEDFilter  bool   `json:"led_filter"` // A500 output lowpass (default: on, like real HW)
+	PreferDeli bool   `json:"prefer_deli"` // replay via the native deliplayer before uade
 }
 
 var cfg appConfig
@@ -27,31 +29,30 @@ func configPath() string {
 }
 
 func loadConfig() {
-	cfg = appConfig{}
+	// defaults chosen so an absent field gets the authentic value
+	cfg = appConfig{LEDFilter: true}
 	data, err := os.ReadFile(configPath())
-	if err != nil {
-		// legacy locations: exe dir, then cwd
-		if exe, e := os.Executable(); e == nil {
-			data, err = os.ReadFile(filepath.Join(filepath.Dir(exe), "config.json"))
-		}
-		if err != nil {
-			data, err = os.ReadFile("config.json")
-		}
-	}
 	if err == nil {
 		json.Unmarshal(data, &cfg)
 	}
 	if cfg.ExportPath != "" {
 		exportPath = cfg.ExportPath
+		// migrate: older configs stored a full .wav path — the
+		// setting is a directory now
+		if strings.EqualFold(filepath.Ext(exportPath), ".wav") {
+			exportPath = filepath.Dir(exportPath)
+		}
 	}
 	if cfg.VuSyncMs <= 0 {
 		cfg.VuSyncMs = 380 // typical driver/PipeWire latency past oto's ring
 	}
+	filterOn = cfg.LEDFilter
 }
 
 func saveConfig() {
 	cfg.ExportPath = exportPath
 	cfg.MusicDir = browseDir
+	cfg.LEDFilter = filterOn
 	d, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return

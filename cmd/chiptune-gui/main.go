@@ -13,6 +13,7 @@ import (
 	"image/png"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,9 @@ import (
 	"amiga-player/internal/decoder"
 	"amiga-player/internal/deliplayer"
 	"amiga-player/internal/render"
+	"amiga-player/internal/openmptplayer"
+	"amiga-player/internal/uadeplayer"
+	"amiga-player/internal/xmpplayer"
 )
 
 const sampleRate = 44100
@@ -270,7 +274,8 @@ var (
 	vu       [8]vuBar
 
 	browseDir  string
-	exportPath string
+	exportPath string // fixed export DIRECTORY (persisted)
+	exportName string // per-song suggested filename ("song.wav")
 	exportMsg  string
 	exportBusy atomic.Bool
 	loadErr    string
@@ -447,12 +452,51 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 	}
 	eng.mu.Unlock()
 
+	// PC tracker formats (XM/IT/S3M/...) go to libopenmpt first: UADE
+	// renders through emulated Paula which is capped at 4 channels, so
+	// these modules lose channels or stall there. libxmp is the fallback.
+	if isPCTracker(path) {
+		if m, err := openmptplayer.LoadFor(path, sub); err == nil {
+			log.Printf("[backend] %s -> openmpt", filepath.Base(path))
+			return m, nil
+		} else {
+			log.Printf("[backend] %s: openmpt failed: %v", filepath.Base(path), err)
+		}
+		if x, err := xmpplayer.LoadFor(path, sub); err == nil {
+			log.Printf("[backend] %s -> xmp", filepath.Base(path))
+			return x, nil
+		}
+	}
+	// pref: native deliplayer before uade (config: prefer_deli)
+	if cfg.PreferDeli && !isPCTracker(path) {
+		if p, err := deliplayer.LoadFor(path, sub); err == nil {
+			log.Printf("[backend] %s -> deliplayer (pref)", filepath.Base(path))
+			return p, nil
+		}
+	}
+	// UADE first: full Amiga emulation = closest to "replay parfait".
+	if u, err := uadeplayer.LoadFor(path, sub); err == nil {
+		log.Printf("[backend] %s -> uade", filepath.Base(path))
+		return u, nil
+	} else {
+		log.Printf("[backend] %s: uade failed: %v", filepath.Base(path), err)
+	}
+	// libxmp fallback covers tracker formats not routed by extension.
+	if x, err := xmpplayer.LoadFor(path, sub); err == nil {
+		log.Printf("[backend] %s -> xmp", filepath.Base(path))
+		return x, nil
+	}
 	d := decoder.New()
 	if err := d.Load(path, sub); err == nil {
+		log.Printf("[backend] %s -> decoder", filepath.Base(path))
 		return d, nil
 	}
 	d.Close()
-	return deliplayer.LoadFor(path, sub)
+	p, err := deliplayer.LoadFor(path, sub)
+	if err == nil {
+		log.Printf("[backend] %s -> deliplayer", filepath.Base(path))
+	}
+	return p, err
 }
 
 // Async module loading: probing DeliPlayer candidates costs seconds,
@@ -476,10 +520,30 @@ var (
 	loadBusy  atomic.Bool
 )
 
+// isPCTracker reports extensions whose home is a PC tracker, not the
+// Amiga: libxmp is the reference replayer for them (any channel count),
+// while UADE's NotePlayer path is capped at 4 Paula channels.
+func isPCTracker(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".xm", ".it", ".s3m", ".mtm", ".far", ".gdm", ".imf",
+		".stm", ".stx", ".ult", ".uni", ".669", ".amf", ".dsm",
+		".itp", ".j2b", ".mdl", ".ptm", ".psm":
+		return true
+	}
+	return false
+}
+
 func loadWorker() {
 	for req := range loadReqCh {
 		loadBusy.Store(true)
-		d, err := loadBackend(req.path, req.sub)
+		d, err := func() (d audioDecoder, err error) {
+			defer func() {
+				if p := recover(); p != nil {
+					err = fmt.Errorf("load: %v", p)
+				}
+			}()
+			return loadBackend(req.path, req.sub)
+		}()
 		loadResCh <- loadResult{d, req.path, req.sub, err}
 	}
 }
@@ -543,7 +607,8 @@ func applyLoadResult(r loadResult) {
 	setBrowseDir(filepath.Dir(path))
 
 	// suggested WAV name: for mdat.*/MCMD.* the real name sits after
-	// the AmigaDOS prefix
+	// the AmigaDOS prefix.  exportPath stays the fixed export DIR —
+	// only the filename is derived from the song.
 	base := filepath.Base(path)
 	for _, p := range modulePrefixes {
 		if strings.HasPrefix(strings.ToLower(base), p) {
@@ -551,8 +616,7 @@ func applyLoadResult(r loadResult) {
 			break
 		}
 	}
-	exportPath = filepath.Join(filepath.Dir(path),
-		strings.TrimSuffix(base, filepath.Ext(base))+".wav")
+	exportName = strings.TrimSuffix(base, filepath.Ext(base)) + ".wav"
 
 	if !eng.playing.Load() {
 		startPlayback()
@@ -813,7 +877,7 @@ func titleBar() g.Widget {
 		// config gear next to the volume
 		imgui.SetCursorPosY(imgui.CursorPosY() + (titleH-24)/2 - lift)
 		iconButtonS("cfg", iconGear, 24, false, func() {
-			cfgSavedExport, cfgSavedVu = exportPath, cfg.VuSyncMs
+			cfgSavedExport, cfgSavedVu, cfgSavedDeli = exportPath, cfg.VuSyncMs, cfg.PreferDeli
 			configOpen = true
 			g.OpenPopup("Config")
 		})
@@ -900,11 +964,16 @@ func transport() g.Widget {
 		imgui.SameLine()
 
 		iconButton("exp", iconExport, eng.dec == nil || exportBusy.Load(), func() {
-			out := exportPath
-			if out == "" {
-				out = filepath.Join(browseDir, "export.wav")
+			// fixed export dir; empty setting = the song's own dir
+			dir := exportPath
+			if dir == "" {
+				dir = filepath.Dir(eng.filePath)
 			}
-			go exportWav(out)
+			name := exportName
+			if name == "" {
+				name = "export.wav"
+			}
+			go exportWav(filepath.Join(dir, name))
 		})
 	})
 }
@@ -990,10 +1059,11 @@ var (
 var (
 	cfgSavedExport string
 	cfgSavedVu     int
+	cfgSavedDeli   bool
 )
 
 func configRestore() {
-	exportPath, cfg.VuSyncMs = cfgSavedExport, cfgSavedVu
+	exportPath, cfg.VuSyncMs, cfg.PreferDeli = cfgSavedExport, cfgSavedVu, cfgSavedDeli
 }
 
 // configPopupLayout: export path field + hint about config.json.
@@ -1010,7 +1080,7 @@ func configPopupLayout() []g.Widget {
 			}
 		}),
 		g.Row(
-			dimText("export path"),
+			dimText("export dir"),
 			g.InputText(&exportPath).Size(268).Label("##wav"),
 			g.Custom(func() {
 				bevelButton("cfgbrowse", "…", exportBrowsing, func() {
@@ -1030,6 +1100,10 @@ func configPopupLayout() []g.Widget {
 					}()
 				})
 			}),
+		),
+		g.Row(
+			dimText("player"),
+			g.Checkbox("native deli first", &cfg.PreferDeli),
 		),
 		g.Row(
 			dimText("vu sync"),
@@ -1452,9 +1526,13 @@ func installRuntime() {
 		filepath.Join(rt, "players"),
 		filepath.Join(rt, "players-uade"),
 	}, deliplayer.PlayerDirs...)
+	deliplayer.GenieDirs = append([]string{
+		filepath.Join(rt, "genies"),
+	}, deliplayer.GenieDirs...)
 	if os.Getenv("DELI_DOSROOT") == "" {
 		os.Setenv("DELI_DOSROOT", filepath.Join(rt, "amiga-dos"))
 	}
+	uadeplayer.SetBaseDir(filepath.Join(rt, "uade"))
 }
 
 func main() {
@@ -1506,7 +1584,7 @@ func main() {
 	}
 	// cimgui's GLFW backend sleeps to a 30 fps default cap; vsync paces
 	// the loop once the target is above the refresh rate.
-	wnd.SetTargetFPS(240)
+	wnd.SetTargetFPS(60)
 	loadDesktopFont()
 	// Amiga-ish accents: orange grabs/marks, softened buttons, dim
 	// separators — the rest stays ImGui dark.

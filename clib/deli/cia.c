@@ -17,11 +17,13 @@ static int      icr_chip, icr_tim; /* timer the captured vector rides on */
 uint32_t        cia_intvec;
 uint32_t        cia_intdata;          /* Interrupt struct for a1   */
 uint32_t        aud_vec, aud_vec_data;/* captured int4 (audio) vec  */
+uint32_t        aud_vecs[4], aud_vec_data4[4]; /* AUD0-3 via SetIntVector */
 
 void cia_init(void)
 {
 	for (int c = 0; c < 2; c++)
 		for (int i = 0; i < 16; i++) creg[c][i] = 0;
+	creg[0][0] = 0x02; /* post-boot state: power LED on (audio LP in) */
 	latch[0][0] = latch[0][1] = latch[1][0] = latch[1][1] = 0xFFFF;
 	ecyc = 0;
 	icr_chip = icr_tim = 0;
@@ -29,6 +31,7 @@ void cia_init(void)
 	cia_intdata = 0;
 	aud_vec = 0;
 	aud_vec_data = 0;
+	for (int i = 0; i < 4; i++) { aud_vecs[i] = 0; aud_vec_data4[i] = 0; }
 }
 
 /* AddICRVector: d0 = ICR bit (0=timer A, 1=timer B), a6 = resource
@@ -71,6 +74,11 @@ static void cia_write(int chip, uint32_t reg, uint8_t v)
 {
 	uint32_t r = (reg >> 8) & 0x0F;
 	creg[chip][r] = v;
+	/* CIA-A PRA bit 1 drives the power LED which switches Paula's
+	 * extra lowpass in/out of circuit — players toggle it for a
+	 * brighter sound (bclr #1,$bfe001). */
+	if (chip == 0 && r == 0x00)
+		paula_set_led((v >> 1) & 1);
 	switch (r) {
 	case 0x04: latch[chip][0] = (uint16_t)((latch[chip][0] & 0xFF00) | v); break;
 	case 0x05: latch[chip][0] = (uint16_t)((latch[chip][0] & 0x00FF) | ((uint16_t)v << 8)); break;

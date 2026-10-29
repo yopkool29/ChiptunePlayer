@@ -2,15 +2,23 @@
 
 A small command-line player for classic Commodore Amiga music formats:
 
+- **Broad Amiga replay via [UADE](https://gitlab.com/uade-music-player/uade)**
+  (primary backend): the original 68k EaglePlayer/DeliTracker replay
+  routines run inside a real Amiga emulation — MOD/ProTracker, XM/
+  FastTracker 2 (NotePlayer path included), AHX, AON, MED, SoundMon,
+  and ~180 other formats from `eagleplayer.conf`
 - **TFMX** ("The Final Musicsystem eXtended", Chris Hülsbeck) — `mdat.*`/`smpl.*`
   file pairs, packed `TFHD` files, TFMX 1.x / Pro / 7V
 - **Future Composer 1.x** (Jochen Hippel) — `.fc`, `.fc13`, `.fc14`, `.smod`
 - plus the Hippel TFMX variants (`.hip`, `.hip7`, `.mcmd`…) as a bonus
 
-The decoding core is Michael Schwendt's
+Backend order at load time: **UADE** (`internal/uadeplayer`, libuade +
+uadecore running the original 68k replay binaries) → native Go decoders
+(TFMX/FC, Michael Schwendt's
 [libtfmxaudiodecoder](https://github.com/mschwendt/libtfmxaudiodecoder)
-(vendored in `clib/`), wrapped in Go via cgo — the same decoder lineage used by
-Audacious, XMMS and GStreamer plugins. Audio output uses
+vendored in `clib/`) → **deliplayer** (`internal/deliplayer`, our
+experimental native backend: Musashi 68k + Paula/CIA emulation running
+DeliPlayer binaries in-process). Audio output uses
 [oto](https://github.com/ebitengine/oto) (PulseAudio on Linux, no C deps).
 
 The player format research started from the original DeliTracker 2.32
@@ -64,9 +72,14 @@ Run `amiga-player -h` for all options.
 ## Layout
 
 ```
-clib/                    vendored C++ decoder (GPL v2, see LICENSE)
-internal/decoder/        Go cgo wrapper around the C API
+clib/                    vendored C++ decoder + native 68k emu (Musashi, Paula, CIA)
+internal/decoder/        Go cgo wrapper around the C API (TFMX/FC)
+internal/deliplayer/     experimental native backend (68k DeliPlayer binaries in-process)
+internal/uadeplayer/     primary backend — libuade/uadecore (full Amiga emulation)
+internal/bundled/        embedded players, genies, amiga-dos env + UADE runtime assets
+third_party/uade/        vendored libuade/bencodetools/zakalwe static libs + headers
 cmd/amiga-player/        CLI frontend
+cmd/chiptune-gui/        Dear ImGui GUI frontend
 ```
 
 ## License

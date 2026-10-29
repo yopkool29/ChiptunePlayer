@@ -20,7 +20,7 @@ int main(int argc, char **argv)
 	if (!p) { fprintf(stderr, "open failed\n"); return 1; }
 	int r = deliplayer_load(p, argv[2]);
 	printf("load=%d tags:", r);
-	for (int i = 7; i < 33; i++) {
+	for (int i = 7; i < 52; i++) {
 		uint32_t t = deliplayer_tag(p, i);
 		if (t) printf(" %d:%x", i, t);
 	}

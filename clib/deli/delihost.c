@@ -25,6 +25,8 @@
 #define SCR_LIB      (HOST_MMIO+0x0F04) /* other fake lib LVO idx    */
 #define SCR_UADE     (HOST_MMIO+0x0F06) /* uade.library LVO idx      */
 #define SCR_CIA      (HOST_MMIO+0x0F08) /* cia?.resource LVO idx     */
+#define SCR_INTU     (HOST_MMIO+0x0F0A) /* intuition.library LVO idx */
+#define SCR_GAD      (HOST_MMIO+0x0F0C) /* gadtools.library LVO idx  */
 #define CALL_DONE    0xFE               /* slot: called routine rts  */
 
 /* extended slot ranges folded into pending_call by scratch address */
@@ -32,6 +34,8 @@
 #define S_LIB_BASE   0x3000
 #define S_UADE_BASE  0x4000
 #define S_CIA_BASE   0x5000
+#define S_INTU_BASE  0x6000
+#define S_GAD_BASE   0x7000
 
 /* slots 0..31 exec LVOs, 32.. dtg functions */
 #define S_LVO0        0x00
@@ -76,10 +80,57 @@ void your_reset_handler_function(void) {}
 #define PC_RING 64
 static unsigned pc_ring[PC_RING];
 static int      pc_ring_i;
+static void pc_ring_dump(void);
 void your_instruction_hook_function(unsigned int pc)
 {
 	static unsigned prev;
 	if (pc >= 0x200000) { prev = pc; return; }   /* skip runaway region */
+	static int wild_n;
+	/* a jump from genie/player code (>=0x100000) into the empty
+	 * mid-RAM zone (<0x100000) is the derailment origin — the
+	 * linear walk after it is just fallout */
+	if (pc >= 0x40000 && pc < 0x100000 && prev >= 0x100000
+	    && getenv("DELI_TRACE") && wild_n++ < 3) {
+		uint32_t sp = m68k_get_reg(0, M68K_REG_A7);
+		fprintf(stderr,
+			"[hook] WILDJUMP %06x->%06x d0=%x a0=%x a1=%x a5=%x a6=%x sp=%06x\n",
+			prev, pc,
+			m68k_get_reg(0, M68K_REG_D0),
+			m68k_get_reg(0, M68K_REG_A0), m68k_get_reg(0, M68K_REG_A1),
+			m68k_get_reg(0, M68K_REG_A5), m68k_get_reg(0, M68K_REG_A6), sp);
+		if (sp < RAM_SIZE - 40) {
+			fprintf(stderr, "[hook] stack:");
+			for (int i = 0; i < 10; i++)
+				fprintf(stderr, " %06x", rb32(sp + i * 4));
+			fprintf(stderr, "\n");
+		}
+		pc_ring_dump();
+		fprintf(stderr, "[hook] bytes@%x: %02x%02x %02x%02x %02x%02x\n",
+			prev,
+			prev < RAM_SIZE ? emu_ram[prev] : 0,
+			prev + 1 < RAM_SIZE ? emu_ram[prev + 1] : 0,
+			prev + 2 < RAM_SIZE ? emu_ram[prev + 2] : 0,
+			prev + 3 < RAM_SIZE ? emu_ram[prev + 3] : 0,
+			prev + 4 < RAM_SIZE ? emu_ram[prev + 4] : 0,
+			prev + 5 < RAM_SIZE ? emu_ram[prev + 5] : 0);
+	}
+	/* control transfer into a zero-filled cell: the signature of a
+	 * call through an empty function slot — the following linear
+	 * walk is fallout */
+	if (wild_n < 8 && pc >= 0x1000 && pc < RAM_SIZE - 4 &&
+	    pc != prev + 2 && pc != prev + 4 && pc != prev + 6 &&
+	    pc != prev + 8 && pc != prev + 10 &&
+	    !rb32(pc) && !rb32(pc + 4) && getenv("DELI_TRACE")) {
+		wild_n++;
+		uint32_t sp = m68k_get_reg(0, M68K_REG_A7);
+		fprintf(stderr,
+			"[hook] ZEROJUMP %06x->%06x d0=%x a0=%x a1=%x a5=%x a6=%x sp=%06x\n",
+			prev, pc,
+			m68k_get_reg(0, M68K_REG_D0),
+			m68k_get_reg(0, M68K_REG_A0), m68k_get_reg(0, M68K_REG_A1),
+			m68k_get_reg(0, M68K_REG_A5), m68k_get_reg(0, M68K_REG_A6), sp);
+		pc_ring_dump();
+	}
 	if (pc < 0x100 && prev >= 0x100 && getenv("DELI_TRACE")) {
 		fprintf(stderr,
 			"[hook] LOWJUMP %06x->%04x d0=%x d1=%x d2=%x d3=%x a0=%x a1=%x a4=%x a5=%x a6=%x sp=%x sr=%x\n",
@@ -100,12 +151,17 @@ void your_instruction_hook_function(unsigned int pc)
 			prev + 5 < RAM_SIZE ? emu_ram[prev + 5] : 0,
 			prev + 6 < RAM_SIZE ? emu_ram[prev + 6] : 0,
 			prev + 7 < RAM_SIZE ? emu_ram[prev + 7] : 0);
+		pc_ring_dump();
+	}
+	if (pc != prev + 2 && pc != prev + 4 && pc != prev + 6 &&
+	    pc != prev + 8 && pc != prev + 10) {
+		/* record only real control transfers — linear walks through
+		 * dead RAM are fallout, not evidence */
+		pc_ring[pc_ring_i] = pc;
+		pc_ring_i = (pc_ring_i + 1) & (PC_RING - 1);
 	}
 	prev = pc;
-	if (pc == pc_ring[(pc_ring_i + PC_RING - 1) & (PC_RING - 1)])
-		return;                            /* collapse tight loops  */
-	pc_ring[pc_ring_i] = pc;
-	pc_ring_i = (pc_ring_i + 1) & (PC_RING - 1);
+	gdb_check_pc(pc);
 }
 static void pc_ring_dump(void)
 {
@@ -140,6 +196,8 @@ void host_mmio_write(unsigned a, unsigned v)
 	case 0x04: slot = S_LIB_BASE  | (v & 0xFFFF); break; /* other libs   */
 	case 0x06: slot = S_UADE_BASE | (v & 0xFFFF); break; /* uade.library */
 	case 0x08: slot = S_CIA_BASE  | (v & 0xFFFF); break; /* cia?.resource */
+	case 0x0a: slot = S_INTU_BASE | (v & 0xFFFF); break; /* intuition    */
+	case 0x0c: slot = S_GAD_BASE  | (v & 0xFFFF); break; /* gadtools     */
 	default:   slot = v & 0xFF; break;                 /* byte slots   */
 	}
 	G->pending_call = slot;
@@ -222,8 +280,14 @@ void emu_build_exec(EmuCtx *c)
 	/* library name table inside sysbase: give exec.library an id string */
 	emu_wstr(SYSBASE_ADDR + 600, "exec.library");
 	wb32(SYSBASE_ADDR + 34, SYSBASE_ADDR + 600); /* ln_Name? ok best-effort */
+	/* SysBase+568: NP runtimes read a clock-ish scalar here and derive
+	 * timing periods (K = field*5) — a zero divides-by-zero.  Use the
+	 * PAL E-clock rate so their period math lands in a sane range. */
+	wb32(SYSBASE_ADDR + 568, 709379);
 	c->sys_base = SYSBASE_ADDR;
 }
+
+static uint32_t g_lib_dos, g_lib_gfx, g_lib_intu, g_lib_asl, g_lib_ciaa, g_lib_ciab, g_lib_uade, g_lib_util, g_lib_gad;
 
 /* ---------- DeliGlobals -------------------------------------------------
  * Struct offsets per DeliPlayer.i.  Function-pointer entries point at
@@ -241,12 +305,20 @@ void emu_build_deliglobals(EmuCtx *c)
 {
 	uint32_t g = emu_alloc(512, 0);
 	c->deli_base = g;
-	/* fake library bases: point at sysbase-adjacent stubs */
+	/* genies fetch DeliGlobals from absolute $0000 (the DeliTracker
+	 * convention: mem[0] = DeliGlobals on the host's machine) */
+	wb32(0, g);
+	/* fake library bases: point at the real fake_lib_ex objects — a
+	 * player calls jsr Base@(-N) and must land on that lib's LVO
+	 * table, not on unrelated sysbase-adjacent stubs */
 	wb32(g + 0,  0);                    /* AslBase   */
-	wb32(g + 4,  c->sys_base + 0x400);  /* DOSBase   */
-	wb32(g + 8,  c->sys_base + 0x500);  /* Intuition */
-	wb32(g + 12, c->sys_base + 0x600);  /* GfxBase   */
-	wb32(g + 16, 0);                    /* GadTools  */
+	wb32(g + 4,  g_lib_dos);            /* DOSBase   */
+	wb32(g + 8,  g_lib_intu);           /* Intuition */
+	wb32(g + 12, g_lib_gfx);            /* GfxBase   */
+	wb32(g + 16, g_lib_gad);            /* +16 = dtg_GadToolsBase per
+	                                     * DeliPlayer.i — the NotePlayer
+	                                     * process builds its control
+	                                     * window through GadTools      */
 	wb32(g + 20, 0);
 	/* dir/file/path scratch strings */
 	uint32_t ps = emu_alloc(1024, 0);
@@ -275,9 +347,8 @@ void emu_build_deliglobals(EmuCtx *c)
 }
 
 /* ---------- host API dispatch ------------------------------------------ */
-static uint32_t g_lib_dos, g_lib_gfx, g_lib_intu, g_lib_asl, g_lib_ciaa, g_lib_ciab, g_lib_uade;
 static int      startint_on;
-static uint32_t fake_task, fake_port;
+static uint32_t fake_task, fake_port, fake_win, fake_winport;
 
 /* append s at the tail of the path buffer string starting at p,
  * hard-bounded by pathbuf end AND arena end (p may be a wild
@@ -563,6 +634,33 @@ static uint32_t dos_dispatch(int idx, uint32_t d1, uint32_t d2, uint32_t d3, uin
 	}
 	case -126: { uint32_t old = dos_curdir; dos_curdir = d1; return old; } /* CurrentDir */
 	case -132: return (uint32_t)dos_ioerr;          /* IoErr           */
+	case -882: { /* AddPart(dir=d1, file=d2, size=d3): genies build
+	              * "<cfgdir>/<name>.prefs" paths with it */
+		char dir[512], file[512];
+		emu_rstr(d1, dir, sizeof dir);
+		emu_rstr(d2, file, sizeof file);
+		size_t need = strlen(dir) + 1 + strlen(file) + 1;
+		if (d1 >= RAM_SIZE - 4 || need > d3 || strlen(dir) + strlen(file) + 1 >= sizeof dir) {
+			dos_ioerr = 221; return 0;
+		}
+		if (dir[0] && dir[strlen(dir) - 1] != '/' && dir[strlen(dir) - 1] != ':')
+			strcat(dir, "/");
+		strncat(dir, file, sizeof dir - strlen(dir) - 1);
+		emu_wstr(d1, dir);
+		dos_ioerr = 0; return 0xFFFFFFFF;
+	}
+	case -906: { /* GetVar(name=d1, buf=d2, size=d3, flags=d4): DeliTracker
+	              * exports "DeliConfig" so genies can find their
+	              * *.prefs under it — return that directory */
+		char nm[128];
+		emu_rstr(d1, nm, sizeof nm);
+		const char *v = strcmp(nm, "DeliConfig") == 0 ? "PROGDIR:DeliConfig" : 0;
+		if (!v) { dos_ioerr = 205; return (uint32_t)-1; }
+		size_t n = strlen(v) + 1;
+		if (d2 >= RAM_SIZE || n > d3) { dos_ioerr = 221; return (uint32_t)-1; }
+		memcpy(emu_ram + d2, v, n);
+		dos_ioerr = 0; return (uint32_t)(n - 1);
+	}
 	case -192: { /* DateStamp(a0) */
 		if (a0 + 12 <= RAM_SIZE) { wb32(a0, 16000); wb32(a0 + 4, 0); wb32(a0 + 8, 0); }
 		return 0;
@@ -640,6 +738,52 @@ static void dispatch(int slot)
 		m68k_set_reg(M68K_REG_D0, rr);
 		return;
 	}
+	if (slot >= S_INTU_BASE && slot < S_GAD_BASE) {
+		/* intuition.library — idx = |lvo|/6 - 1 */
+		int idx = slot & 0xFFF;
+		uint32_t rr = 0;
+		switch (idx) {
+		case 4:  rr = g_lib_intu; break;       /* lib Open      */
+		case 5:  case 6:  rr = 0; break;       /* Close/Expunge */
+		case 23: rr = 0; break;                /* -144 ItemAddress    */
+		case 43: rr = 1; break;                /* -264 SetMenuStrip   */
+		case 51: rr = 0; break;                /* -312 WindowToFront  */
+		case 74: rr = 1; break;                /* -450 ActivateWindow */
+		case 100: rr = fake_win; break;        /* -606 OpenWindowTagList */
+		default:
+			if (getenv("DELI_TRACE"))
+				fprintf(stderr, "[intu] lvo_idx=%d (-%d)\n", idx, (idx + 1) * 6);
+			rr = 0;
+		}
+		m68k_set_reg(M68K_REG_D0, rr);
+		return;
+	}
+	if (slot >= S_GAD_BASE) {
+		/* gadtools.library — idx = |lvo|/6 - 1 */
+		int idx = slot & 0xFFF;
+		uint32_t rr = 0;
+		switch (idx) {
+		case 4:  rr = g_lib_gad; break;        /* lib Open      */
+		case 5:  case 6:  rr = 0; break;       /* Close/Expunge */
+		case 7:  rr = emu_alloc(64, 0); break; /* -48 CreateMenusA -> menustrip */
+		case 9:  rr = 1; break;                /* -60 LayoutMenuItemsA */
+		case 10: rr = 1; break;                /* -66 LayoutMenusA     */
+		case 11: rr = 0; break;                /* -72 GT_GetIMsg: no IDCMP queue */
+		case 12: rr = 0; break;                /* -78 GT_ReplyIMsg     */
+		case 13: rr = 0; break;                /* -84 GT_RefreshWindow */
+		case 16: rr = a0; break;               /* -102 GT_FilterIMsg   */
+		case 17: rr = a0; break;               /* -108 GT_PostFilterIMsg */
+		case 18: rr = emu_alloc(64, 0); break; /* -114 CreateContext   */
+		case 20: rr = emu_alloc(64, 0); break; /* -126 GetVisualInfoA  */
+		case 21: rr = 0; break;                /* -132 FreeVisualInfo  */
+		default:
+			if (getenv("DELI_TRACE"))
+				fprintf(stderr, "[gad ] lvo_idx=%d (-%d)\n", idx, (idx + 1) * 6);
+			rr = 0;
+		}
+		m68k_set_reg(M68K_REG_D0, rr);
+		return;
+	}
 
 	if (slot < S_GETLISTDATA) {
 		switch (slot) {
@@ -650,6 +794,7 @@ static void dispatch(int slot)
 			char nm[64]; emu_rstr(a1, nm, sizeof nm);
 			if (strstr(nm, "uade"))      r = g_lib_uade;
 			else if (strstr(nm, "dos"))  r = g_lib_dos;
+			else if (strstr(nm, "utility")) r = g_lib_util;
 			else if (strstr(nm, "graphics") || strstr(nm, "gfx")) r = g_lib_gfx;
 			else if (strstr(nm, "intuition")) r = g_lib_intu;
 			else if (strstr(nm, "asl"))  r = g_lib_asl;
@@ -665,13 +810,77 @@ static void dispatch(int slot)
 		}
 		case 8: case 9: case 10: case 11: r = 0; break; /* Forbid/Permit/Dis/Ena */
 		case 12: r = fake_task; break;               /* FindTask */
-		case 13: case 14: case 17: case 18: case 19: r = 0; break; /* waits */
+		case 13: /* Wait: while genie code holds the CPU (np call or
+		          * resumed process) this parks the process — in_np says
+		          * whether an np invocation is in flight (chain the np
+		          * routine or resume the player), in_proc marks the
+		          * process's own emu_call (park = end timeslice) */
+			if (G->in_np || G->in_proc) {
+				for (int i = 0; i < 8; i++) {
+					G->proc_regs[i]     = m68k_get_reg(0, M68K_REG_D0 + i);
+					G->proc_regs[8 + i] = m68k_get_reg(0, M68K_REG_A0 + i);
+				}
+				G->proc_regs[16] = m68k_get_reg(0, M68K_REG_PC);
+				G->proc_regs[17] = m68k_get_reg(0, M68K_REG_SR);
+				G->proc_susp = 1;
+				if (getenv("DELI_TRACE"))
+					fprintf(stderr, "[park] pc=%x sp=%x ret=%x\n",
+					        G->proc_regs[16], G->proc_regs[15],
+					        rb32(G->proc_regs[15]));
+				if (G->in_np) {
+					if (G->np_chain) {
+						/* a note call was queued behind the wake:
+						 * park the process, run the np routine now
+						 * (still inside the np call — keep in_np) */
+						m68k_set_reg(M68K_REG_A7, G->np_ret_sp - 4);
+						wb32(G->np_ret_sp - 4, G->np_ret_pc);
+						m68k_set_reg(M68K_REG_PC, G->np_chain);
+						G->np_chain = 0;
+					} else {
+						G->in_np = 0;
+						/* resume the player past its jsr */
+						m68k_set_reg(M68K_REG_PC, G->np_ret_pc);
+						m68k_set_reg(M68K_REG_A7, G->np_ret_sp);
+					}
+				} else {
+					/* plain park: break the emu_call timeslice */
+					m68k_end_timeslice();
+					G->pending_call = CALL_DONE;
+				}
+				/* the genie process must see only genuinely pending
+				 * signal bits: the msg port when notes are queued —
+				 * bit12 is an external stop signal we never raise and
+				 * the window UserPort stays silent (returning the raw
+				 * mask made it exit after one wake: btst #12 → flag
+				 * cleared → teardown) */
+				d0 &= (G->msg_h < G->msg_t) ? 0x10 : 0;
+			}
+			r = d0; break;
+		case 14: r = 0; break;                       /* Signal */
 		case 15: case 16: r = 0; break;              /* AddPort/RemPort */
+		case 17: /* PutMsg(a0=port, a1=msg): queue the note message */
+			if (G->msg_t - G->msg_h < 64)
+				G->msg_q[(G->msg_t++) & 63] = a1;
+			r = 0; break;
+		case 18: /* GetMsg(a0=port) -> message or NULL */
+			r = (G->msg_h < G->msg_t) ? G->msg_q[(G->msg_h++) & 63] : 0;
+			break;
+		case 19: /* WaitPort: GetMsg semantics; empty just returns NULL —
+		          * the real blocking happens at Wait */
+			r = (G->msg_h < G->msg_t) ? G->msg_q[(G->msg_h++) & 63] : 0;
+			break;
 		case 20: case 21: case 22: r = 0; break;     /* Dev calls */
-		case 23: { /* SetIntVector: d0=intNumber, a1=struct Interrupt,
-		              is_code@+18. int4 = audio channels (vec 0x70) */
+		case 23:                                   /* AddIntServer -168 */
+		case 0x7A: { /* SetIntVector -162: d0=intNumber, a1=struct
+		              * Interrupt, is_code@+18. int4 = audio channels
+		              * (vec 0x70); ints 7-10 = per-channel AUD0-3 —
+		              * the NotePlayer genie drives its mixer from
+		              * AUD0/AUD1 DMA-finish interrupts */
 			uint32_t code = rb32(a1 + 18);
-			if (d0 == 4) { aud_vec = code; aud_vec_data = rb32(a1 + 14); }
+			if (d0 >= 7 && d0 <= 10) {
+				aud_vecs[d0 - 7] = code;
+				aud_vec_data4[d0 - 7] = rb32(a1 + 14);
+			} else if (d0 == 4) { aud_vec = code; aud_vec_data = rb32(a1 + 14); }
 			else         { cia_intvec = code; cia_intdata = a1; }
 			r = a1; break;
 		}
@@ -703,6 +912,10 @@ static void dispatch(int slot)
 			m68k_set_reg(M68K_REG_A0, G->list[n]);
 			r = G->listsz[n];
 		} else { m68k_set_reg(M68K_REG_A0, 0); r = 0; }
+		if (getenv("DELI_TRACE"))
+			fprintf(stderr, "[host] GetListData n=%d nlist=%d -> a0=%x sz=%d\n",
+			        n, G->nlist,
+			        (unsigned)m68k_get_reg(0, M68K_REG_A0), (int)r);
 		break;
 	}
 	case S_LOADFILE: {
@@ -759,7 +972,65 @@ static void dispatch(int slot)
 	case S_WAITDMA:   r = 0; break;
 	case S_LOCKSCREEN: r = 0; break;
 	case S_UNLOCKSCR: r = 0; break;
-	case S_NOTEPLAYER: r = 0; break;
+	case S_NOTEPLAYER:
+		/* the player filled a NoteStruct and asks the host to play it —
+		 * DeliTracker forwards the call to the active NotePlayer genie's
+		 * DTP_NotePlayer routine.  Push the current PC so the genie's
+		 * RTS lands right back in the player (plain jsr semantics: all
+		 * registers pass through untouched), and publish the NoteStruct
+		 * pointer at the genie's DTP_NoteInfo slot first. */
+		if (G->np_fn) {
+			if (getenv("DELI_TRACE"))
+				fprintf(stderr, "[np  ] var=%x *var=%x f74=%x susp=%d\n",
+				        rb32(0x10775e), 0, rb32(G->deli_base + 0x74), G->proc_susp);
+			/* the "current NoteStruct": T_NOTESTRUCT is a chained slot —
+			 * *np_struct gives a mid pointer whose first longword is the
+			 * real struct base (observed: tag->102422->10b68a) */
+			uint32_t ns = G->np_struct ? rb32(G->np_struct) : 0;
+			if (ns >= 0x1000 && ns < RAM_SIZE - 4) {
+				uint32_t nxt = rb32(ns);
+				if (nxt >= 0x1000 && nxt < RAM_SIZE) ns = nxt;
+			}
+			if (G->np_info) wb32(G->np_info, ns ? ns : a1);
+			/* every call refreshes the player's resume point: on a
+			 * Wait-suspend the player continues right here */
+			G->np_ret_pc = m68k_get_reg(0, M68K_REG_PC);
+			G->np_ret_sp = m68k_get_reg(0, M68K_REG_A7);
+			G->in_np = 1;
+			if (G->proc_susp) {
+				/* genie parked at a Wait: resume it so it consumes the
+				 * queued notes, then chain into the np routine when it
+				 * parks again (co-routine switch per note call) */
+				G->np_chain = G->np_fn;
+				for (int i = 0; i < 8; i++) {
+					m68k_set_reg(M68K_REG_D0 + i, G->proc_regs[i]);
+					m68k_set_reg(M68K_REG_A0 + i, G->proc_regs[8 + i]);
+				}
+				m68k_set_reg(M68K_REG_PC, G->proc_regs[16]);
+				G->proc_susp = 0;
+			} else {
+				wb32(G->np_ret_sp - 4, G->np_ret_pc);
+				m68k_set_reg(M68K_REG_A7, G->np_ret_sp - 4);
+				m68k_set_reg(M68K_REG_PC, G->np_fn);
+			}
+		}
+		r = d0; break;
+	case 0xCC: /* CreateIORequest(a0=port, d0=size) -> ioreq */
+		r = emu_alloc(d0 ? d0 : 48, 1);
+		break;
+	case 0xCD: /* DeleteIORequest */ r = 0; break;
+	case 0xCE: { /* CreateMsgPort() -> fresh MsgPort with a sigbit */
+		uint32_t p = emu_alloc(64, 1);
+		if (p) {
+			emu_ram[p + 15] = 5; emu_ram[p + 35] = 5;
+			wb32(p + 36, fake_task);        /* mp_SigTask */
+		}
+		r = p; break;
+	}
+	case 0xCF: /* DeleteMsgPort */ r = 0; break;
+	case 0xD0: r = 0; break;                 /* ObtainSemaphoreShared */
+	case 0xD1: r = host_alloc(d0, d1); break;/* AllocVec */
+	case 0xD2: emu_free(a1); r = 0; break;   /* FreeVec */
 	case S_ALLOCLIST: {
 		uint32_t a = host_alloc(d0, d1);
 		if (a && G->nlist < 64) {
@@ -831,12 +1102,16 @@ int64_t emu_call(EmuCtx *c, uint32_t faddr, int64_t d0, int64_t d1, int64_t a0, 
 	m68k_set_reg(M68K_REG_PC, faddr);
 	pc_ring_i = 0;
 
+	gdb_emu_start();
+	if (getenv("DELI_TRACE"))
+		fprintf(stderr, "[host] emu_call -> %06x\n", faddr);
 	long budget = 80000000;              /* ~11ms: raster waits need
 	                                      * a full frame (~5ms)     */
 	while (budget > 0) {
 		uint32_t prev_pc = m68k_get_reg(0, M68K_REG_PC);
-		int used = m68k_execute(20000);
+		int used = m68k_execute(gdb_slice_cycles());
 		budget -= used;
+		gdb_poll_stop();
 		emu_time_ns += (uint64_t)used * 141; /* ~141 ns/cycle @7.09MHz */
 		/* fire the captured CIA handler like a real IRQ: push the
 		 * current PC and jump — the server's RTS resumes the flow.
@@ -865,7 +1140,7 @@ int64_t emu_call(EmuCtx *c, uint32_t faddr, int64_t d0, int64_t d1, int64_t a0, 
 		 * window; a pc outside means the stack/flow is corrupt —
 		 * bailing now keeps garbage execution from scribbling RAM */
 		if (pc >= RAM_SIZE && pc < HOST_MMIO) break;
-		if (pc < 0x100 && getenv("DELI_TRACE"))
+		if (pc < 0x100 && getenv("DELI_TRACE")) {
 			fprintf(stderr,
 				"[host] JUMP->%04x from %06x d0=%x d1=%x d2=%x a0=%x a1=%x a4=%x a5=%x a6=%x\n",
 				pc, prev_pc,
@@ -873,6 +1148,9 @@ int64_t emu_call(EmuCtx *c, uint32_t faddr, int64_t d0, int64_t d1, int64_t a0, 
 				m68k_get_reg(0, M68K_REG_D2), m68k_get_reg(0, M68K_REG_A0),
 				m68k_get_reg(0, M68K_REG_A1), m68k_get_reg(0, M68K_REG_A4),
 				m68k_get_reg(0, M68K_REG_A5), m68k_get_reg(0, M68K_REG_A6));
+			pc_ring_dump();
+		}
+		if (pc < 0x100) break;       /* executing DeliGlobals/vectors — dead */
 	}
 	if (budget <= 0 && getenv("DELI_TRACE")) {
 		fprintf(stderr, "[host] emu_call %x BUDGET EXPIRED pc=%x\n",
@@ -942,11 +1220,12 @@ void emu_tick(EmuCtx *c)
  * an rts that returns to the CALL_DONE trampoline. */
 void emu_aud_irq(int ch)
 {
-	uint32_t h = aud_vec ? aud_vec : rb32(0x70);
+	uint32_t v = (ch >= 0 && ch < 4) ? aud_vecs[ch] : 0;
+	uint32_t h = v ? v : (aud_vec ? aud_vec : rb32(0x70));
 	if (!h) return;
 	uint32_t sp = 0x00800000;
 	wb32(sp, tramp(CALL_DONE));
-	if (aud_vec) {
+	if (!v && aud_vec) {
 		m68k_set_reg(M68K_REG_A7, sp);
 		wb32(IRQ_HD, h);
 		wb32(IRQ_DT, aud_vec_data);
@@ -957,7 +1236,8 @@ void emu_aud_irq(int ch)
 		wb32(sp + 2, IRQ_RTS);       /* PC: rte lands here */
 		wb16(sp + 6, 0);             /* frame format 0 (68020 rte) */
 		m68k_set_reg(M68K_REG_A7, sp);
-		m68k_set_reg(M68K_REG_A1, 0);
+		m68k_set_reg(M68K_REG_A0, 0xDFF000);
+		m68k_set_reg(M68K_REG_A1, v ? aud_vec_data4[ch] : 0);
 		m68k_set_reg(M68K_REG_A6, rb32(4));
 		m68k_set_reg(M68K_REG_PC, h);
 	}
@@ -989,13 +1269,37 @@ EmuCtx *emu_create(void)
 	emu_build_exec(c);
 	g_lib_dos  = fake_lib_ex(240, SCR_DOS);   /* real per-LVO dispatch */
 	g_lib_gfx  = fake_lib_ex(48, SCR_LIB);
-	g_lib_intu = fake_lib_ex(48, SCR_LIB);
+	g_lib_intu = fake_lib_ex(140, SCR_INTU);  /* V39: down to -846     */
 	g_lib_asl  = fake_lib_ex(48, SCR_LIB);
+	g_lib_util = fake_lib_ex(120, SCR_LIB);   /* utility.library: inert */
+	g_lib_gad  = fake_lib_ex(32, SCR_GAD);    /* gadtools.library      */
 	/* cia?.resource must be a real LVO-table object: players jsr into
 	 * it (AddICRVector installs the tick handler) */
 	g_lib_ciaa = fake_lib_ex(8, SCR_CIA);
 	g_lib_ciab = fake_lib_ex(8, SCR_CIA);
-	fake_task = emu_alloc(64, 0); fake_port = emu_alloc(64, 0);
+	fake_task = emu_alloc(96, 0); fake_port = emu_alloc(64, 0);
+	/* a real exec Task: genie processes FindTask(0) themselves and pull
+	 * their stack bounds from tc_SPLower/SPUpper — give them a private
+	 * stack region or they switch A7 to 0 and fall off the world */
+	uint32_t pstack = emu_alloc(0x4000, 1);
+	wb32(fake_task + 0x36, pstack);         /* tc_SPLower */
+	wb32(fake_task + 0x3a, pstack + 0x4000);/* tc_SPUpper */
+	wb32(fake_task + 0x3e, pstack + 0x4000);/* tc_SPReg   */
+	wb32(fake_task + 0x42, pstack + 0x4000);/* tc_SPAddr  */
+	/* genies read the port signal bit at +15 AND the real mp_SigBit
+	 * field (+35) — give both a distinct bit */
+	emu_ram[fake_port + 15] = 4; emu_ram[fake_port + 35] = 4;
+	wb32(fake_port + 36, fake_task);        /* mp_SigTask */
+	G->fake_port = fake_port;
+	/* fake intuition Window: the NotePlayer process opens one through
+	 * OpenWindowTagList and reads its UserPort at win+86 — give it a
+	 * private MsgPort on sigbit 9 (never signalled: no IDCMP events
+	 * arrive on the headless build) */
+	fake_win = emu_alloc(256, 0); fake_winport = emu_alloc(64, 0);
+	emu_ram[fake_winport + 15] = 9; emu_ram[fake_winport + 35] = 9;
+	wb32(fake_winport + 36, fake_task);
+	wb32(fake_win + 4,  fake_winport);      /* w_WindowPort */
+	wb32(fake_win + 86, fake_winport);      /* w_UserPort   */
 	for (int i = 0; i < 256; i++) put_tramp(i);
 	/* fake uade.library: per-index stubs; -12 debug and -24 eagle
 	 * options get real trampolines */

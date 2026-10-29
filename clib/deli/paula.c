@@ -50,7 +50,11 @@ static int      led_filter;
 long paula_fetch_calls, paula_fetch_nz;   /* debug counters */
 
 static float   lvl_acc[4];  /* per-channel output peak for the VU  */
-static double  lp[4];       /* LED lowpass state                   */
+/* A500 output filter (WinUAE audio.cpp model): a static 2-pole RC
+ * (6.2kHz + 20kHz) is ALWAYS in circuit; the LED switch adds a
+ * 3-pole 7kHz lowpass on top.  LED is on after a real Amiga boot,
+ * so filtered is the default replay state. */
+static double  flt[4][5];   /* per-channel RC stages rc1..rc5      */
 
 /* VU snapshot ring: the renderer runs ~one output buffer ahead of
  * the DAC, so a live level reads ~N ms in the future.  Snapshots are
@@ -76,7 +80,7 @@ void paula_init(void)
 {
 	memset(ch, 0, sizeof ch);
 	memset(lvl_acc, 0, sizeof lvl_acc);
-	memset(lp, 0, sizeof lp);
+	memset(flt, 0, sizeof flt);
 	memset(lvl_ring, 0, sizeof lvl_ring);
 	memset(lvl_ring_t, 0, sizeof lvl_ring_t);
 	lvl_ring_i = 0;
@@ -84,7 +88,7 @@ void paula_init(void)
 	audio_ns = 0;
 	dmacon = 0x200;   /* host owns the master audio-DMA bit, like DeliTracker */
 	intena = intreq = adkcon = 0;
-	led_filter = 0;
+	led_filter = 1;   /* power LED is on after a real Kickstart boot */
 }
 
 void paula_set_led(int on) { led_filter = on; }
@@ -103,9 +107,13 @@ int paula_chan_level(int c)
 {
 	if (c < 0 || c > 3) return 0;
 	uint64_t t = audio_ns > vu_lead_ns ? audio_ns - vu_lead_ns : 0;
-	for (int i = LVL_RING - 1; i >= 0; i--)
+	/* circular ring: scan backwards from the newest entry */
+	for (int k = 1; k <= LVL_RING; k++) {
+		int i = lvl_ring_i - k;
+		if (i < 0) i += LVL_RING;
 		if (lvl_ring_t[i] && lvl_ring_t[i] <= t)
 			return lvl_ring[i][c];
+	}
 	return 0;
 }
 int  paula_dma_pending(void) { return (dmacon & 0x200) != 0 && (dmacon & 0xF); }
@@ -124,60 +132,31 @@ static void chan_write(int c, uint32_t off, uint16_t v)
 		p->loop = (p->loop & 0xFFFF) | ((uint32_t)v << 16);
 		if (!on) p->ptr = p->loop;
 		break;
-	case 0x02: /* LCL */
-		p->loop = (p->loop & 0xFFFF0000) | v;
+	case 0x02: /* LCL: HW forces the pointer word-aligned (WinUAE: &0xFFFE) */
+		p->loop = (p->loop & 0xFFFF0000) | (v & 0xFFFE);
 		if (!on) p->ptr = p->loop;
 		break;
 	case 0x04: /* LEN: written value 0 means 65536 words on real HW */
 		p->llen = v ? v : 0x10000;
 		if (!on) p->len = p->llen;
 		break;
-	case 0x06: p->per = v; break;
-	case 0x08: p->vol = v; break;
+	case 0x06: p->per = v ? v : 0x10000; break; /* PER=0 counts as 65536 */
+	case 0x08: /* VOL: 7-bit register, clamped to 64 on real HW */
+		p->vol = v & 0x7F;
+		if (p->vol > 64) p->vol = 64;
+		break;
 	case 0x0A: p->dat = v; p->use_dat = 1; break;
 	}
 }
 
-/* Byte write: real custom regs are 16-bit, so a byte store hits one
- * lane — odd address = low byte, even = high byte.  The common idiom
- * is `move.b d0,AUDxVOL+1`; without this the volume write lands in
- * the void and the channel plays at vol 0 (ArtOfNoise-4V). */
+/* Byte write to a custom reg: OCS Paula writes the byte DUPLICATED
+ * into both halves of the word-aligned register (WinUAE custom_bput:
+ * rval = (v<<8)|v, addr&~1).  `move.b d0,AUDxVOL+1` thus lands the
+ * value in vol — and likewise a byte store to PER/LEN/LC writes the
+ * whole register, not one lane. */
 void paula_write8(uint32_t reg, uint16_t v)
 {
-	if (reg >= AUD_OFF(0) && reg < AUD_OFF(0) + 0x40) {
-		int c = (reg - AUD_OFF(0)) / 0x10;
-		PChan *p = &ch[c];
-		int on = (dmacon & (1 << c)) != 0;
-		switch (reg & 0x0F) {
-		case 0x00: p->loop = (p->loop & 0x00FFFFFF) | ((uint32_t)(v & 0xFF) << 24); goto lc;
-		case 0x01: p->loop = (p->loop & 0xFF00FFFF) | ((uint32_t)(v & 0xFF) << 16); goto lc;
-		case 0x02: p->loop = (p->loop & 0xFFFF00FF) | ((uint32_t)(v & 0xFF) << 8);  goto lc;
-		case 0x03: p->loop = (p->loop & 0xFFFFFF00) |  (uint32_t)(v & 0xFF);        goto lc;
-		case 0x04: p->llen = (uint16_t)(((v & 0xFF) << 8) | (p->llen & 0xFF)); goto ln;
-		case 0x05: p->llen = (uint16_t)((p->llen & 0xFF00) | (v & 0xFF));      goto ln;
-		case 0x06: p->per = (uint16_t)(((v & 0xFF) << 8) | (p->per & 0xFF)); break;
-		case 0x07: p->per = (uint16_t)((p->per & 0xFF00) | (v & 0xFF));        break;
-		case 0x08: p->vol = (uint16_t)(((v & 0xFF) << 8) | (p->vol & 0xFF)); break;
-		case 0x09: p->vol = (uint16_t)((p->vol & 0xFF00) | (v & 0xFF));        break;
-		case 0x0A: p->dat = (uint16_t)(((v & 0xFF) << 8) | (p->dat & 0xFF)); p->use_dat = 1; break;
-		case 0x0B: p->dat = (uint16_t)((p->dat & 0xFF00) | (v & 0xFF));        p->use_dat = 1; break;
-		}
-		return;
-	lc:	if (!on) p->ptr = p->loop;
-		return;
-	ln:	if (!on) p->len = p->llen;
-		return;
-	}
-	uint16_t *w = 0;   /* global regs: merge into the 16-bit shadow */
-	switch (reg & ~1u) {
-	case R_DMACON: w = &dmacon; break;
-	case R_INTENA: w = &intena; break;
-	case R_INTREQ: w = &intreq; break;
-	case R_ADKCON: w = &adkcon; break;
-	}
-	if (!w) return;
-	if (reg & 1) *w = (uint16_t)((*w & 0xFF00) | (v & 0xFF));
-	else         *w = (uint16_t)((*w & 0x00FF) | ((v & 0xFF) << 8));
+	paula_write(reg & ~1u, (uint16_t)(((v & 0xFF) << 8) | (v & 0xFF)));
 }
 
 extern unsigned int m68k_get_reg(void*, int);
@@ -271,6 +250,36 @@ uint16_t paula_read(uint32_t reg)
  * loops keep sounding until the next tick rewrite.
  * A latched AUDxDAT word is emitted first when the channel starts.
  * --------------------------------------------------------------------- */
+static void aud_irq(PChan *p)
+{
+	int c = (int)(p - ch);
+	intreq |= 0x80 << c;
+	if ((intena & 0x4000) && (intena & (0x80 << c)))
+		emu_aud_irq(c);
+}
+
+/* Manual (non-DMA) AUDxDAT playback, channel off: a DAT write plays the
+ * word once — hi byte then lo byte at `per` — and raises the channel
+ * audio interrupt, then stops until another write.  audio.device's
+ * non-DMA mode and DAT-poke synths are paced by that IRQ.  A write
+ * while the interrupt is still pending only latches the word (HW:
+ * `dat_written` waits for `!isirq` before re-entering play state). */
+static int8_t manual_byte(PChan *p)
+{
+	if (p->half) {                    /* low byte of the word */
+		p->half = 0; p->have_w = 0; /* one-shot: word done -> silence */
+		return (int8_t)(p->w & 0xFF);
+	}
+	if (p->use_dat && !(intreq & (0x80 << (int)(p - ch)))) {
+		p->w = p->dat; p->use_dat = 0;
+		aud_irq(p);                 /* request + run handler if enabled */
+		p->have_w = 1; p->half = 1;
+		return (int8_t)(p->w >> 8); /* high byte first */
+	}
+	p->have_w = 0;
+	return 0;
+}
+
 static int8_t next_byte(PChan *p)
 {
 	if (p->half) { p->half = 0; return (int8_t)(p->w & 0xFF); }
@@ -283,12 +292,9 @@ static int8_t next_byte(PChan *p)
 			 * chunk in the int4 handler (vector 0x70).  Level-
 			 * triggered would re-fire forever on a dead channel,
 			 * so edge-trigger: once per drained segment. */
-			int c = (int)(p - ch);
-			if (!p->end_irq && (intena & 0x4000) &&
-			    (intena & (0x80 << c))) {
+			if (!p->end_irq) {
 				p->end_irq = 1;
-				intreq |= 0x80 << c; /* handler reads INTREQR for ch */
-				emu_aud_irq(c);
+				aud_irq(p); /* request bit sets even with intena off */
 			}
 			if (p->len == 0) {
 				if (!p->llen) { p->have_w = 0; return 0; }
@@ -310,9 +316,22 @@ static int8_t next_byte(PChan *p)
 	return (int8_t)(p->w >> 8);
 }
 
+/* WinUAE rc_calculate_a0: 1-pole RC coefficient with the bilinear
+ * transform pre-warp, so the pole lands on the exact cutoff. */
+static double rc_a0(int rate, int fc)
+{
+	if (fc >= rate / 2) return 1.0;
+	double w = 2.0 * M_PI * fc / rate;
+	w = tan(w / 2.0) * 2.0;
+	return 1.0 / (1.0 + 1.0 / w);
+}
+
 void paula_render(int16_t *out, int frames, int rate)
 {
 	double clk_per_frame = PAL_CLOCK / rate;
+	/* A500 filter poles (WinUAE audio.cpp FILTER_MODEL_A500) */
+	const double a1 = rc_a0(rate, 6200), a2 = rc_a0(rate, 20000);
+	const double af = rc_a0(rate, 7000);
 	double lvl_rel = exp(-1.0 / ((double)rate * 0.12)); /* ~120ms VU release */
 	uint64_t t0 = audio_ns;
 	for (int i = 0; i < frames; i++) {
@@ -320,19 +339,35 @@ void paula_render(int16_t *out, int frames, int rate)
 		for (int c = 0; c < 4; c++) {
 			PChan *p = &ch[c];
 			lvl_acc[c] *= lvl_rel;       /* envelope decays even when off */
-			if (!(dmacon & 0x200) || !(dmacon & (1 << c))) continue;
-			if (p->per == 0) continue;   /* not programmed yet: silent */
-			p->frac += clk_per_frame;
-			int8_t s = 0;
-			if (p->have_w) s = (int8_t)(p->half ? (p->w >> 8) : (p->w & 0xFF));
-			while (p->frac >= p->per) {
-				p->frac -= p->per;
-				s = next_byte(p);
+			int on = (dmacon & 0x200) && (dmacon & (1 << c));
+			/* channel off: a leftover word drains once, and a latched
+			 * AUDxDAT plays it manually (audio.device-style DAC) */
+			int manual = !on && (p->use_dat || p->have_w);
+			double v = 0;
+			if ((on || manual) && p->per) {
+				p->frac += clk_per_frame;
+				int8_t s = 0;
+				if (p->have_w) s = (int8_t)(p->w >> (p->half ? 8 : 0));
+				while (p->frac >= p->per) {
+					p->frac -= p->per;
+					s = on ? next_byte(p) : manual_byte(p);
+				}
+				v = p->muted ? 0 : (double)s * p->vol;
 			}
-			/* volume 0..64, pan: ch0+ch3 left, ch1+ch2 right (PT std) */
-			double v = p->muted ? 0 : s * p->vol * (led_filter ? 0.6 : 1.0);
-			lp[c] += 0.25 * (v - lp[c]);
-			v = led_filter ? lp[c] : v;
+			/* the RC network keeps discharging while a channel is
+			 * silent — freeze it instead and the residue pops back
+			 * out at the next activation (WinUAE filters every
+			 * channel every frame for the same reason) */
+			double *f = flt[c];
+			f[0] += a1 * (v - f[0]);       /* static RC: always on  */
+			f[1] += a2 * (f[0] - f[1]);
+			v = f[1];
+			if (led_filter) {               /* power-LED lowpass     */
+				f[2] += af * (v - f[2]);
+				f[3] += af * (f[2] - f[3]);
+				f[4] += af * (f[3] - f[4]);
+				v = f[4];
+			}
 			double a = v < 0 ? -v : v;
 			if (a > lvl_acc[c]) lvl_acc[c] = (float)a;
 			if (c == 0 || c == 3) l += v; else r += v;

@@ -1,8 +1,9 @@
 # Build artifacts
 bin/
-lib/
+/lib/
 *.o
 *.a
+!third_party/**/*.a
 
 # Test modules (copyrighted, downloaded from modland.com)
 testdata/
@@ -16,3 +17,4 @@ extracted/
 reference/
 bin.tar.gz
 *.zip
+chiptune-gui

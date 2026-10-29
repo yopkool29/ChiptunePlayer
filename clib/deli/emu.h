@@ -40,6 +40,14 @@ void m68k_write_memory_8(unsigned addr, unsigned value);
 void m68k_write_memory_16(unsigned addr, unsigned value);
 void m68k_write_memory_32(unsigned addr, unsigned value);
 
+/* gdbstub.c — DELI_GDB=<port> remote debugging */
+void gdb_emu_start(void);
+void gdb_poll_stop(void);
+int  gdb_slice_cycles(void);
+void gdb_check_pc(unsigned pc);
+void gdb_check_write(unsigned a, int size);
+int  gdb_active(void);
+
 /* ---- arena allocator (emulated-side) ---- */
 void     mem_reset(void);
 uint32_t emu_alloc(uint32_t size, uint32_t chip_only);
@@ -83,6 +91,7 @@ double cia_tick_hz(void);
 /* level-6 int handler vector captured via SetIntVector-style write */
 extern uint32_t cia_intvec;
 extern uint32_t aud_vec, aud_vec_data;
+extern uint32_t aud_vecs[4], aud_vec_data4[4]; /* per-channel AUD0-3 */
 extern uint32_t cia_intdata;    /* Interrupt struct passed in a1 */
 /* feed CPU cycles; nonzero when the vector's timer underflows */
 int     cia_pump(int cpu_cycles);
@@ -114,6 +123,23 @@ struct emu_ctx {
 	uint32_t chkdata, chksize;
 	uint16_t sndnum;
 	double   tick_in;           /* seconds until next interrupt fires */
+	/* active NotePlayer genie: dtg_NotePlayer calls jump here.
+	 * np_fn   = genie's DTP_NotePlayer routine
+	 * np_info = addr where the current NoteStruct ptr is stored
+	 * np_sig  = genie's DTP_NoteSignal routine (song events)      */
+	uint32_t np_fn, np_info, np_sig;
+	uint32_t np_struct;             /* player's T_NOTESTRUCT slot (ptr to NoteStruct) */
+	uint32_t genie_code, genie_size;/* bound genie's code hunk bounds */
+	int      proc_susp;             /* genie suspended at a Wait */
+	uint32_t proc_regs[18];         /* saved D0-D7,A0-A7,PC,SR */
+	uint32_t np_ret_pc, np_ret_sp;  /* caller's resume point (post-jsr) */
+	int      in_np;                 /* servicing a dtg_NotePlayer call */
+	int      in_proc;               /* running the genie's T_PROCESS */
+	uint32_t np_chain;              /* np routine to run after a suspend */
+	uint32_t msg_q[64];             /* PutMsg/GetMsg FIFO */
+	int      msg_h, msg_t;
+	uint32_t proc_fn;               /* genie's T_PROCESS entry */
+	uint32_t fake_port;             /* host-owned MsgPort for genies */
 };
 
 EmuCtx *emu_create(void);

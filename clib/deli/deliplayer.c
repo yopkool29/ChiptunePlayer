@@ -2,6 +2,7 @@
  * lifecycle (Check2 -> InitPlayer -> InitSound -> Interrupt ticks) and
  * streams Paula audio.  Public surface used by the Go binding. */
 #include "emu.h"
+#include "m68k.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -22,13 +23,15 @@ enum {
 	T_MAXTAG
 };
 
-typedef struct {
+typedef struct DeliPlayer DeliPlayer;
+struct DeliPlayer {
 	EmuCtx  *ctx;
 	uint32_t code;                     /* code hunk base */
 	uint32_t tags[T_MAXTAG + 1];       /* resolved tag addrs (0=absent) */
 	uint32_t flags;
 	int      inited;
-} DeliPlayer;
+	DeliPlayer *genie;                 /* bound NotePlayer genie (shares ctx) */
+};
 
 extern void emu_set_tick(EmuCtx *c, uint32_t fn, int cia_mode);
 
@@ -65,6 +68,76 @@ DeliPlayer *deliplayer_open(const char *player_path)
 	if (parse_tags(p, cb) != 0) { emu_destroy(p->ctx); free(p); return 0; }
 	emu_set_tick(p->ctx, p->tags[T_INTERRUPT], 1);
 	return p;
+}
+
+/* bind a NotePlayer genie to a noteplayer-style player (FT2/XM, IT,
+ * MED…): the genie is another DELIRIUM binary loaded into the SAME
+ * emulated machine — it receives the player's dtg_NotePlayer calls and
+ * plays the notes itself (software-mixing genies write Paula like the
+ * internal Paula-NotePlayer did).  A second emu_create would realloc
+ * and wipe the shared emu_ram, so we hunk_load on the player's ctx. */
+int deliplayer_genie(DeliPlayer *p, const char *genie_path)
+{
+	DeliPlayer *g = calloc(1, sizeof *g);
+	g->ctx = p->ctx;
+	uint32_t gb = 0, gs = 0;
+	if (!hunk_load(genie_path, &gb, &gs) || gb == 0) { free(g); return -1; }
+	g->code = gb;
+	if (parse_tags(g, gb) != 0) { free(g); return -2; }
+	p->genie = g;
+	EmuCtx *c = p->ctx;
+	c->genie_code = gb;
+	c->genie_size = gs;
+	c->np_info = g->tags[T_NOTEINFO];
+	c->np_sig  = g->tags[T_NOTESIGNAL];
+	/* T_NOTEPLAYER's data is the address of a slot holding the routine
+	 * pointer (filled by the genie's InitPlayer), so run init first and
+	 * then dereference. */
+	if (g->tags[T_INITPLAYER])
+		emu_call(c, g->tags[T_INITPLAYER], 0,0,0,0);
+	uint32_t tnp = g->tags[T_NOTEPLAYER];
+	uint32_t indirect = tnp ? rb32(tnp) : 0;
+	c->np_fn = (indirect >= 0x1000 && indirect < 0x900000) ? indirect : tnp;
+	/* DeliTracker hands the genie a MsgPort: its tag slot is where the
+	 * host writes the port address it will PutMsg to. */
+	if (g->tags[T_MSGPORT] && c->fake_port)
+		wb32(g->tags[T_MSGPORT], c->fake_port);
+	/* asynchronous genies: T_PROCESS is the process entry — start it
+	 * once; it parks at its first Wait and each dtg_NotePlayer call
+	 * resumes it co-operatively */
+	c->proc_fn = g->tags[T_PROCESS];
+	if (c->proc_fn) {
+		c->in_proc = 1;
+		emu_call(c, c->proc_fn, 0,0,0,0);
+		c->in_proc = 0;
+		if (getenv("DELI_TRACE")) {
+			fprintf(stderr, "[genie] proc start -> susp=%d pc=%x\n",
+			        c->proc_susp, (unsigned)m68k_get_reg(0, M68K_REG_PC));
+			uint32_t slot = c->proc_fn + 0x1aca;   /* moveal <slot>,a5 */
+			fprintf(stderr, "[genie] a5slot=%x -> %x (a5 base)\n",
+			        slot, rb32(slot));
+			uint32_t a5 = rb32(slot);
+			for (int i = 0; i < 8; i++)
+				fprintf(stderr, "[genie]   a5+%02d = %x\n", i*4, rb32(a5 + i*4));
+			/* process globals: fp lib base + second port object */
+			fprintf(stderr, "[genie]   obj(10e9f4)=%x  fplib(10e940)=%x\n",
+			        rb32(c->proc_fn + 0x1ba6), rb32(c->proc_fn + 0x1af2));
+		}
+	}
+	if (getenv("DELI_TRACE")) {
+		fprintf(stderr, "[genie] %s tag=%x ind=%x np=%x info=%x sig=%x code=%x proc=%x port=%x\n",
+		        genie_path, tnp, indirect, c->np_fn, c->np_info, c->np_sig, gb,
+		        g->tags[T_PROCESS], g->tags[T_MSGPORT]);
+		fprintf(stderr, "[genie] bytes@np: %02x%02x %02x%02x %02x%02x %02x%02x\n",
+		        emu_ram[c->np_fn], emu_ram[c->np_fn+1], emu_ram[c->np_fn+2],
+		        emu_ram[c->np_fn+3], emu_ram[c->np_fn+4], emu_ram[c->np_fn+5],
+		        emu_ram[c->np_fn+6], emu_ram[c->np_fn+7]);
+		fprintf(stderr, "[genie] *proc=%x *port=%x *sig=%x\n",
+		        g->tags[T_PROCESS] ? rb32(g->tags[T_PROCESS]) : 0,
+		        g->tags[T_MSGPORT] ? rb32(g->tags[T_MSGPORT]) : 0,
+		        c->np_sig ? rb32(c->np_sig) : 0);
+	}
+	return 0;
 }
 
 static int load_module(EmuCtx *c, const char *path)
@@ -104,6 +177,21 @@ int deliplayer_load(DeliPlayer *p, const char *mod_path)
 		return -3;
 	if (p->tags[T_INITPLAYER] && emu_call(c, p->tags[T_INITPLAYER], 0,0,0,0))
 		return -4;
+	/* InitNote: let the player set up its NoteStruct (noteplayer
+	 * players only), then publish it at the genie's NoteInfo slot */
+	if (p->tags[T_INITNOTE]) emu_call(c, p->tags[T_INITNOTE], 0,0,0,0);
+	c->np_struct = p->tags[T_NOTESTRUCT];
+	if (p->genie && p->genie->tags[T_NOTEINFO] && p->tags[T_NOTESTRUCT])
+		wb32(p->genie->tags[T_NOTEINFO], rb32(p->tags[T_NOTESTRUCT]));
+	/* the genie's InitPlayer gates on its NoteInfo slot — it must run
+	 * after the publish above (the attach-time call bails early), or
+	 * audio.device/SetIntVector/Paula setup never happen */
+	if (p->genie && p->genie->tags[T_INITPLAYER])
+		emu_call(c, p->genie->tags[T_INITPLAYER], 0,0,0,0);
+	if (p->genie && p->genie->tags[T_INITSOUND])
+		emu_call(c, p->genie->tags[T_INITSOUND], 0,0,0,0);
+	if (p->genie && p->genie->tags[T_STARTINT])
+		emu_call(c, p->genie->tags[T_STARTINT], 0,0,0,0);
 	/* InitSound has no return contract (per spec); run it for side effects */
 	if (p->tags[T_INITSOUND]) emu_call(c, p->tags[T_INITSOUND], 0,0,0,0);
 	if (p->tags[T_STARTINT]) emu_call(c, p->tags[T_STARTINT], 0,0,0,0);
@@ -140,8 +228,13 @@ int  deliplayer_songend(DeliPlayer *p) { return p->ctx->songend_flag; }
 void deliplayer_close(DeliPlayer *p)
 {
 	if (p->inited && p->tags[T_ENDSOUND]) emu_call(p->ctx, p->tags[T_ENDSOUND], 0,0,0,0);
+	if (p->genie && p->genie->tags[T_ENDSOUND])
+		emu_call(p->ctx, p->genie->tags[T_ENDSOUND], 0,0,0,0);
 	if (p->inited && p->tags[T_ENDPLAYER]) emu_call(p->ctx, p->tags[T_ENDPLAYER], 0,0,0,0);
+	if (p->genie && p->genie->tags[T_ENDPLAYER])
+		emu_call(p->ctx, p->genie->tags[T_ENDPLAYER], 0,0,0,0);
 	emu_destroy(p->ctx);
+	free(p->genie);
 	free(p);
 }
 
