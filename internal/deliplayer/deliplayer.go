@@ -43,6 +43,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -50,6 +52,22 @@ var (
 	mu     sync.Mutex // serializes the single emulated instance
 	active bool       // an emulated Amiga is alive right now
 )
+
+// probeGen is bumped by CancelProbe: an in-flight LoadFor notices at
+// the next candidate boundary and gives up, so a newer module request
+// never waits behind a full brute-force scan.
+var probeGen atomic.Uint64
+
+// CancelProbe asks any running LoadFor scan to bail out early.
+func CancelProbe() { probeGen.Add(1) }
+
+// scanBudget caps the exhaustive candidate sweep in wall-clock time:
+// past it we surrender and let the caller's next backend (uade/xmp)
+// try the module.  Legitimate deep scans take ~35 s on the bundled
+// corpus, so the budget sits above that — it only guards against
+// pathological files that make every candidate burn its full probe.
+// Interactive loads escape earlier via CancelProbe.
+const scanBudget = 60 * time.Second
 
 // PlayerDirs is searched for 68k player binaries, in order.
 var PlayerDirs = []string{
@@ -86,6 +104,7 @@ var extPlayer = map[string]string{
 	".nt":  "PTK-Prowiz",
 	".stk": "PTK-Prowiz",
 	".pt":  "PTK-Prowiz",
+	".dm2": "DeltaMusic2.0",
 }
 
 type Player struct {
@@ -294,7 +313,18 @@ func LoadFor(path string, song int) (*Player, error) {
 	}
 	cands = append(cands, allPlayers()...)
 	trace := os.Getenv("DELI_PROBE_TRACE") != ""
+	gen := probeGen.Load()
+	deadline := time.Now().Add(scanBudget)
+	stale := func() bool {
+		return probeGen.Load() != gen || time.Now().After(deadline)
+	}
 	for _, c := range cands {
+		if stale() {
+			if trace {
+				fmt.Fprintf(os.Stderr, "[probe] aborted\n")
+			}
+			return nil, ErrNoPlayer
+		}
 		if !sniffPlayer(c) {
 			continue
 		}
@@ -319,7 +349,7 @@ func LoadFor(path string, song int) (*Player, error) {
 			pl.Close()
 			continue
 		}
-		if !pl.probeAudio(1.5) {
+		if !pl.probeAudioUntil(1.5, stale) {
 			// weak Check2: the player accepted a foreign module but
 			// only renders silence — keep probing other candidates
 			pl.Close()
@@ -350,8 +380,18 @@ func LoadFor(path string, song int) (*Player, error) {
 // a real module is detected in a few ms, only a silent player burns
 // the whole budget.
 func (pl *Player) probeAudio(secs float64) bool {
+	return pl.probeAudioUntil(secs, nil)
+}
+
+// probeAudioUntil is probeAudio with an abort check between render
+// rounds: stale()==true (newer request pending or scan deadline hit)
+// reports false so the caller moves on to the next candidate.
+func (pl *Player) probeAudioUntil(secs float64, stale func() bool) bool {
 	chunk := make([]byte, 44100/20*4) // ~50 ms per round
 	for t := 0.0; t < secs; t += 0.05 {
+		if stale != nil && stale() {
+			return false
+		}
 		for i := range chunk {
 			chunk[i] = 0
 		}

@@ -10,14 +10,14 @@ func TestLoadBackendRecover(t *testing.T) {
 	ahx := root + "/AHX/Mortimer Twang/moonmaster.ahx"
 	bad := root + "/TFMX ST/Chris Huelsbeck/mdat.jim power level 1"
 
-	d1, err := loadBackend(ahx, 0)
+	d1, err := loadBackend(ahx, 0, 0)
 	if err != nil {
 		t.Fatalf("ahx #1: %v", err)
 	}
 	eng.dec = d1
 	t.Logf("ahx #1: %T", d1)
 
-	d2, err := loadBackend(bad, 0)
+	d2, err := loadBackend(bad, 0, 0)
 	if err != nil {
 		t.Logf("tfmx-st rejected: %v", err)
 	} else {
@@ -25,7 +25,7 @@ func TestLoadBackendRecover(t *testing.T) {
 		t.Logf("tfmx-st accepted: %T", d2)
 	}
 
-	d3, err := loadBackend(ahx, 0)
+	d3, err := loadBackend(ahx, 0, 0)
 	if err != nil {
 		t.Fatalf("ahx #2: %v", err)
 	}

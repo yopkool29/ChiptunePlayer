@@ -33,6 +33,7 @@ import (
 	"amiga-player/internal/deliplayer"
 	"amiga-player/internal/render"
 	"amiga-player/internal/openmptplayer"
+	"amiga-player/internal/sndhplayer"
 	"amiga-player/internal/uadeplayer"
 	"amiga-player/internal/xmpplayer"
 )
@@ -441,9 +442,14 @@ func startPlayback() {
 // core at the same time.
 var backendMu sync.Mutex
 
-func loadBackend(path string, sub int) (audioDecoder, error) {
+// errStale marks a backend attempt abandoned because a newer module
+// request arrived while it was running.
+var errStale = errors.New("stale load request")
+
+func loadBackend(path string, sub int, gen uint64) (audioDecoder, error) {
 	backendMu.Lock()
 	defer backendMu.Unlock()
+	stale := func() bool { return gen != 0 && loadGen.Load() != gen }
 	// the DeliPlayer core is single-instance: a live emulated player
 	// must be closed before any probe runs (hard swap, no crossfade)
 	eng.mu.Lock()
@@ -458,6 +464,17 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 	}
 	eng.mu.Unlock()
 
+	// Atari ST formats (SNDH/YM): dedicated AtariAudio backend — the
+	// deli sweep would burn a full 169-candidate scan on files no
+	// Paula player can touch, and UADE rejects SNDH outright.
+	if sndhplayer.Supported(path) {
+		if s, err := sndhplayer.LoadFor(path, sub); err == nil {
+			log.Printf("[backend] %s -> sndhplayer", filepath.Base(path))
+			return s, nil
+		} else {
+			log.Printf("[backend] %s: sndhplayer failed: %v", filepath.Base(path), err)
+		}
+	}
 	// PC tracker formats (XM/IT/S3M/...) go to libopenmpt first: UADE
 	// renders through emulated Paula which is capped at 4 channels, so
 	// these modules lose channels or stall there. libxmp is the fallback.
@@ -474,11 +491,16 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 		}
 	}
 	// pref: native deliplayer before uade (config: prefer_deli)
+	deliTried := false
 	if cfg.PreferDeli && !isPCTracker(path) {
+		deliTried = true
 		if p, err := deliplayer.LoadFor(path, sub); err == nil {
 			log.Printf("[backend] %s -> deliplayer (pref)", filepath.Base(path))
 			return p, nil
 		}
+	}
+	if stale() {
+		return nil, errStale
 	}
 	// UADE first: full Amiga emulation = closest to "replay parfait".
 	if u, err := uadeplayer.LoadFor(path, sub); err == nil {
@@ -486,6 +508,9 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 		return u, nil
 	} else {
 		log.Printf("[backend] %s: uade failed: %v", filepath.Base(path), err)
+	}
+	if stale() {
+		return nil, errStale
 	}
 	// libxmp fallback covers tracker formats not routed by extension.
 	if x, err := xmpplayer.LoadFor(path, sub); err == nil {
@@ -498,6 +523,14 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 		return d, nil
 	}
 	d.Close()
+	if stale() {
+		return nil, errStale
+	}
+	if deliTried {
+		// the brute-force scan already ran for this path — a second
+		// LoadFor would burn another full candidate sweep
+		return nil, deliplayer.ErrNoPlayer
+	}
 	p, err := deliplayer.LoadFor(path, sub)
 	if err == nil {
 		log.Printf("[backend] %s -> deliplayer", filepath.Base(path))
@@ -511,12 +544,14 @@ func loadBackend(path string, sub int) (audioDecoder, error) {
 type loadReq struct {
 	path string
 	sub  int
+	gen  uint64
 }
 
 type loadResult struct {
 	d    audioDecoder
 	path string
 	sub  int
+	gen  uint64
 	err  error
 }
 
@@ -524,6 +559,7 @@ var (
 	loadReqCh = make(chan loadReq, 1)
 	loadResCh = make(chan loadResult, 1)
 	loadBusy  atomic.Bool
+	loadGen   atomic.Uint64
 )
 
 // isPCTracker reports extensions whose home is a PC tracker, not the
@@ -548,26 +584,47 @@ func loadWorker() {
 					err = fmt.Errorf("load: %v", p)
 				}
 			}()
-			return loadBackend(req.path, req.sub)
+			return loadBackend(req.path, req.sub, req.gen)
 		}()
-		loadResCh <- loadResult{d, req.path, req.sub, err}
+		if d != nil && loadGen.Load() != req.gen {
+			// superseded while probing: free the decoder right away —
+			// a stale deliplayer pins the single emu slot and would
+			// reject every candidate of the next request's scan
+			d.Close()
+			d = nil
+			err = errStale
+		}
+		loadResCh <- loadResult{d, req.path, req.sub, req.gen, err}
 	}
 }
 
 // loadModule queues a module load; only the newest pending request is
 // kept so rapid double-clicks don't pile up stale probes.
 func loadModule(path string, sub int) {
+	gen := loadGen.Add(1)
+	// cut short any in-flight deliplayer brute-force scan so this
+	// request doesn't queue behind tens of seconds of dead probing
+	deliplayer.CancelProbe()
+	req := loadReq{path, sub, gen}
 	select {
-	case loadReqCh <- loadReq{path, sub}:
+	case loadReqCh <- req:
 	default:
 		<-loadReqCh
-		loadReqCh <- loadReq{path, sub}
+		loadReqCh <- req
 	}
 }
 
 // applyLoadResult finishes a load on the UI thread (all GUI state is
 // touched here, never from the worker).
 func applyLoadResult(r loadResult) {
+	if r.gen != loadGen.Load() {
+		// superseded by a newer request: drop the stale decoder —
+		// closing it here also frees the single-instance deli slot
+		if r.d != nil {
+			r.d.Close()
+		}
+		return
+	}
 	loadBusy.Store(false)
 	if r.err != nil {
 		if errors.Is(r.err, deliplayer.ErrNoPlayer) {
@@ -1196,7 +1253,7 @@ func exportWav(out string) {
 	exportMsg = "exporting…"
 	defer func() { exportBusy.Store(false) }()
 
-	d, err := loadBackend(eng.filePath, eng.sub)
+	d, err := loadBackend(eng.filePath, eng.sub, 0)
 	if err != nil {
 		exportMsg = "load: " + err.Error()
 		return

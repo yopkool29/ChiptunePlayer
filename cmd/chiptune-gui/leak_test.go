@@ -11,7 +11,7 @@ func TestDOSHandleLeak(t *testing.T) {
 	ahx := "testdata/AHX/Mortimer Twang/moonmaster.ahx"
 
 	for i := 0; i < 40; i++ {
-		d, err := loadBackend(ahx, 0)
+		d, err := loadBackend(ahx, 0, 0)
 		if err != nil {
 			t.Fatalf("iter %d: %v", i, err)
 		}
