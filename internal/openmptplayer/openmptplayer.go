@@ -5,7 +5,8 @@ package openmptplayer
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../third_party/libopenmpt/include
-#cgo LDFLAGS: -l:libopenmpt.so.0
+#cgo linux LDFLAGS: -l:libopenmpt.so.0
+#cgo windows LDFLAGS: -l:libopenmpt.dll.a
 #include <stdlib.h>
 #include <string.h>
 #include <libopenmpt/libopenmpt.h>

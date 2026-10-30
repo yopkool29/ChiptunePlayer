@@ -5,7 +5,9 @@
 package xmpplayer
 
 /*
-#cgo LDFLAGS: -lxmp
+#cgo !windows LDFLAGS: -lxmp
+#cgo windows CFLAGS: -DLIBXMP_STATIC
+#cgo windows LDFLAGS: -l:libxmp.a
 #include <stdlib.h>
 #include <xmp.h>
 */

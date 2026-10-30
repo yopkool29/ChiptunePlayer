@@ -3,6 +3,7 @@
  * and applies 32-bit relocations against emulated load addresses. */
 #include "emu.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static uint32_t be32(const uint8_t *p)

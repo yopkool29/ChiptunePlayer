@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package uadeplayer plays Amiga modules through libuade (Unix Amiga
 // Delitracker Emulator): the original 68k replay routines run inside a
 // real Amiga emulation (UAE CPU + Paula + the UADE "score" OS layer).

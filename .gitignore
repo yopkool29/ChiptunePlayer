@@ -17,4 +17,4 @@ extracted/
 reference/
 bin.tar.gz
 *.zip
-chiptune-gui
+/chiptune-gui

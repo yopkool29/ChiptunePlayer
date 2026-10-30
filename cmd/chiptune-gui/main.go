@@ -26,6 +26,7 @@ import (
 	"github.com/AllenDang/cimgui-go/imgui"
 	g "github.com/AllenDang/giu"
 	"github.com/ebitengine/oto/v3"
+	"github.com/sqweek/dialog"
 
 	"amiga-player/internal/bundled"
 	"amiga-player/internal/decoder"
@@ -350,17 +351,22 @@ func setBrowseDir(p string) {
 	}
 }
 
-// pickDir opens a native directory chooser (zenity) to set the
+// pickDirDialog opens the native directory chooser (IFileOpenDialog
+// on Windows, zenity on Linux) and returns the picked path or "".
+func pickDirDialog(title string) string {
+	p, err := dialog.Directory().Title(title).Browse()
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// pickDir opens a native directory chooser to set the
 // library's start directory. Runs async so the frame loop stays free.
 func pickDir() {
 	go func() {
-		out, err := exec.Command("zenity", "--file-selection",
-			"--directory", "--title=Dossier de départ",
-			"--filename="+browseDir+"/").Output()
-		if err == nil {
-			if p := strings.TrimSpace(string(out)); p != "" {
-				setBrowseDir(p)
-			}
+		if p := pickDirDialog("Dossier de départ"); p != "" {
+			setBrowseDir(p)
 		}
 	}()
 }
@@ -1089,14 +1095,7 @@ func configPopupLayout() []g.Widget {
 					}
 					exportBrowsing = true
 					go func() {
-						out, err := exec.Command("zenity", "--file-selection",
-							"--directory", "--title=Choose export directory",
-							"--filename="+exportPath+string(filepath.Separator)).Output()
-						p := ""
-						if err == nil {
-							p = strings.TrimSpace(string(out))
-						}
-						exportBrowseCh <- p
+						exportBrowseCh <- pickDirDialog("Choose export directory")
 					}()
 				})
 			}),
@@ -1377,6 +1376,9 @@ func fixFontAtlas() {
 		"/usr/share/fonts/opentype/inter/Inter-BoldItalic.otf",
 		uiFontPath,
 	} {
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
 		logoFont = io.Fonts().AddFontFromFileTTFV(p, 22, fc, nil)
 		if logoFont != nil {
 			break

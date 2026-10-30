@@ -13,7 +13,12 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <ctype.h>
+#ifndef _WIN32
 #include <dirent.h>
+#else
+#include <direct.h>
+#define mkdir(p, m) _mkdir(p)
+#endif
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -443,6 +448,11 @@ static void dos_translate(const char *ap, char *out, int sz)
  * writes the resolved path to out, or -1 if a component is missing. */
 static int ci_resolve(const char *in, char *out, int sz)
 {
+#ifdef _WIN32
+	/* the host fs is already case-insensitive: stat() either found the
+	 * file or no case variant exists — per-component scan can't help */
+	return -1;
+#else
 	char cur[1024] = "";
 	const char *p = in;
 	if (*p == '/') { strcpy(cur, "/"); p++; }
@@ -475,6 +485,7 @@ static int ci_resolve(const char *in, char *out, int sz)
 	}
 	snprintf(out, sz, "%s", cur);
 	return 0;
+#endif
 }
 
 /* dos_path translates ap and, when the literal path does not exist,

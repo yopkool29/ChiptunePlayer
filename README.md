@@ -44,6 +44,15 @@ make player   # CLI only
 make gui      # GUI only
 ```
 
+On Windows, build inside an [MSYS2](https://www.msys2.org) shell
+(`pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libxmp
+mingw-w64-ucrt-x86_64-libopenmpt make`, plus a Windows Go toolchain);
+`make` produces `bin/amiga-player.exe` + `bin/chiptune-gui.exe`. Copy
+the runtime DLLs next to the binaries:
+`cp /ucrt64/bin/{libstdc++-6,libgcc_s_seh-1,libwinpthread-1,libopenmpt-0,libvorbisfile-3,zlib1,libmpg123-0,libogg-0,libvorbis-0}.dll bin/`.
+The UADE backend is not available on Windows (libuade/uadecore are
+POSIX-only); deliplayer + the native decoders + openmpt/xmp take over.
+
 ## GUI
 
 ```sh

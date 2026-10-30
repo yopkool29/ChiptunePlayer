@@ -1,3 +1,11 @@
+ifeq ($(OS),Windows_NT)
+EXE := .exe
+GUIH := -ldflags=-H=windowsgui
+else ifneq (,$(findstring _NT,$(shell uname -s)))
+EXE := .exe
+GUIH := -ldflags=-H=windowsgui
+endif
+
 CXX      ?= g++
 CXXFLAGS ?= -O2 -fPIC -fno-exceptions -fno-rtti
 CPPFLAGS += -Iclib
@@ -34,10 +42,10 @@ $(DELILIB): $(DELI_OBJS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 player: $(LIB) $(DELILIB)
-	go build -o bin/amiga-player ./cmd/amiga-player
+	go build -o bin/amiga-player$(EXE) ./cmd/amiga-player
 
 gui: $(LIB) $(DELILIB)
-	go build -o bin/chiptune-gui ./cmd/chiptune-gui
+	go build -o bin/chiptune-gui$(EXE) $(GUIH) ./cmd/chiptune-gui
 
 clean:
-	rm -f $(OBJS) $(DELI_OBJS) $(LIB) $(DELILIB) bin/amiga-player bin/chiptune-gui
+	rm -f $(OBJS) $(DELI_OBJS) $(LIB) $(DELILIB) bin/amiga-player$(EXE) bin/chiptune-gui$(EXE)

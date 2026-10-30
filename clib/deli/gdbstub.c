@@ -6,6 +6,18 @@
  *
  *  gdb-multiarch -ex 'target remote :6666'
  */
+#include "emu.h"
+
+#ifdef _WIN32
+/* No BSD sockets: the DELI_GDB remote-debug stub is disabled. */
+void gdb_emu_start(void) {}
+void gdb_poll_stop(void) {}
+int  gdb_slice_cycles(void) { return 20000; }
+void gdb_check_pc(unsigned pc) { (void)pc; }
+void gdb_check_write(unsigned a, int size) { (void)a; (void)size; }
+int  gdb_active(void) { return 0; }
+#else
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +27,6 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 
-#include "emu.h"
 #include "../musashi/m68k.h"
 
 extern void m68k_end_timeslice(void);
@@ -340,3 +351,5 @@ void gdb_check_write(unsigned a, int size)
 }
 
 int gdb_active(void) { return conn >= 0; }
+
+#endif /* _WIN32 */
